@@ -15,7 +15,7 @@ async def main() -> None:
     crawler = PlaywrightCrawler(
         request_handler=router,
         headless=True,
-        max_requests_per_crawl=10,
+        max_requests_per_crawl=500,  # Increased to handle all blog URLs + content extraction
         http_client=HttpxHttpClient(),
         # Increase timeout to prevent handler timeout
         request_handler_timeout=timedelta(minutes=5),  # 5 minutes
