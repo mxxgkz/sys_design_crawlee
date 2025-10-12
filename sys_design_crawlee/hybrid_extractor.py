@@ -183,23 +183,64 @@ class HybridContentExtractor:
         """Extract content using Newspaper3k"""
         try:
             print(f"🔍 Trying Newspaper3k extraction for: {url}")
-            article = Article(url)
             
-            # Configure headers to avoid 406 errors
-            article.set_headers({
+            # Disable SSL warnings globally
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # Try a different approach: use requests directly and pass HTML to newspaper3k
+            import requests
+            import ssl
+            
+            # Create unverified SSL context
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # Create session with SSL bypass
+            session = requests.Session()
+            session.verify = False
+            
+            # Configure headers
+            headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-            })
+            }
             
-            # Configure SSL verification bypass for problematic sites
-            article.config.verify_ssl = False
-            
-            article.download()
-            article.parse()
+            # Download the page content directly with SSL bypass
+            try:
+                response = session.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                html_content = response.text
+                
+                print(f"📄 Downloaded HTML content: {len(html_content)} chars")
+                
+                # Create article and set the HTML content directly
+                article = Article(url)
+                article.set_html(html_content)
+                article.parse()
+                
+            except Exception as download_error:
+                print(f"⚠️ Direct download failed: {download_error}")
+                print(f"🔄 Falling back to standard newspaper3k method...")
+                
+                # Fallback to standard method with enhanced SSL bypass
+                article = Article(url)
+                
+                # Configure headers
+                article.config.headers = headers
+                article.config.verify_ssl = False
+                
+                # Try to set session if possible
+                if hasattr(article.config, 'session'):
+                    article.config.session = session
+                
+                article.download()
+                article.parse()
             
             # Check if we got any content
             if not article.text or len(article.text.strip()) < 50:

@@ -21,6 +21,9 @@ MAX_BLOGS_TO_PROCESS = -1
 # Flag to control table parsing - set to False to skip table parsing and focus on enqueuing
 ENABLE_TABLE_PARSING = False  # -1 means no limit
 
+# Flag to force re-extraction of blog content even if previously extracted successfully
+FORCE_REEXTRACT_BLOGS = True  # Set to True to re-extract all blogs regardless of previous status
+
 # Logging helper functions
 def log_info(context, message):
     """Helper function for info logging"""
@@ -1482,16 +1485,21 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                         context.log.info(f'🔄 Skipping duplicate URL (session): {blog_url}')
                         continue
                     
-                    # Check if blog content extraction was successful
-                    extraction_status = await check_blog_extraction_status(blog_url, 'storage')
-                    
-                    if extraction_status['successful']:
-                        context.log.info(f'✅ Skipping URL (successful extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
-                        continue
-                    elif extraction_status['exists']:
-                        context.log.info(f'🔄 Retrying URL (failed extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                    # Check if blog content extraction was successful (unless force re-extract is enabled)
+                    context.log.info(f'🔍 DEBUG: FORCE_REEXTRACT_BLOGS = {FORCE_REEXTRACT_BLOGS}')
+                    if FORCE_REEXTRACT_BLOGS:
+                        context.log.info(f'🔄 Force re-extracting URL: {blog_url} (FORCE_REEXTRACT_BLOGS=True)')
                     else:
-                        context.log.info(f'📝 New URL (no record): {blog_url} (reason: {extraction_status.get("reason", "unknown")})')
+                        context.log.info(f'🔍 DEBUG: Checking extraction status for {blog_url}')
+                        extraction_status = await check_blog_extraction_status(blog_url, 'storage')
+                        
+                        if extraction_status['successful']:
+                            context.log.info(f'✅ Skipping URL (successful extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
+                            continue
+                        elif extraction_status['exists']:
+                            context.log.info(f'🔄 Retrying URL (failed extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                        else:
+                            context.log.info(f'📝 New URL (no record): {blog_url} (reason: {extraction_status.get("reason", "unknown")})')
                     
                     # Mark URL as processed
                     processed_urls.add(blog_url)
@@ -1586,16 +1594,21 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                         context.log.info(f'🔄 Skipping duplicate URL (session): {href}')
                         continue
                     
-                    # Check if blog content extraction was successful
-                    extraction_status = await check_blog_extraction_status(href, 'storage')
-                    
-                    if extraction_status['successful']:
-                        context.log.info(f'✅ Skipping URL (successful extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
-                        continue
-                    elif extraction_status['exists']:
-                        context.log.info(f'🔄 Retrying URL (failed extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                    # Check if blog content extraction was successful (unless force re-extract is enabled)
+                    context.log.info(f'🔍 DEBUG: FORCE_REEXTRACT_BLOGS = {FORCE_REEXTRACT_BLOGS}')
+                    if FORCE_REEXTRACT_BLOGS:
+                        context.log.info(f'🔄 Force re-extracting URL: {href} (FORCE_REEXTRACT_BLOGS=True)')
                     else:
-                        context.log.info(f'📝 New URL (no record): {href} (reason: {extraction_status.get("reason", "unknown")})')
+                        context.log.info(f'🔍 DEBUG: Checking extraction status for {href}')
+                        extraction_status = await check_blog_extraction_status(href, 'storage')
+                        
+                        if extraction_status['successful']:
+                            context.log.info(f'✅ Skipping URL (successful extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
+                            continue
+                        elif extraction_status['exists']:
+                            context.log.info(f'🔄 Retrying URL (failed extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                        else:
+                            context.log.info(f'📝 New URL (no record): {href} (reason: {extraction_status.get("reason", "unknown")})')
                     
                     # Mark URL as processed
                     processed_urls.add(href)
