@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import urllib3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse
@@ -17,6 +18,9 @@ from readability import Document
 import requests
 from playwright.async_api import Page
 from bs4 import BeautifulSoup
+
+# Disable SSL warnings since we're bypassing verification for problematic sites
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class HybridContentExtractor:
@@ -90,7 +94,12 @@ class HybridContentExtractor:
             extraction_results['errors'].append(f'Newspaper3k: {str(e)}')
             
             if context:
-                context.log.warning(f"❌ Newspaper3k failed: {e}")
+                if "406" in str(e) or "Not Acceptable" in str(e):
+                    context.log.warning(f"❌ Newspaper3k failed: 406 Not Acceptable - site may be blocking automated requests")
+                elif "SSL" in str(e) or "certificate" in str(e).lower():
+                    context.log.warning(f"❌ Newspaper3k failed: SSL certificate issue - {e}")
+                else:
+                    context.log.warning(f"❌ Newspaper3k failed: {e}")
         
         # Method 2: Readability-lxml (Secondary - for clean content)
         try:
@@ -119,7 +128,12 @@ class HybridContentExtractor:
             extraction_results['errors'].append(f'Readability: {str(e)}')
             
             if context:
-                context.log.warning(f"❌ Readability failed: {e}")
+                if "406" in str(e) or "Not Acceptable" in str(e):
+                    context.log.warning(f"❌ Readability failed: 406 Not Acceptable - site may be blocking automated requests")
+                elif "SSL" in str(e) or "certificate" in str(e).lower():
+                    context.log.warning(f"❌ Readability failed: SSL certificate issue - {e}")
+                else:
+                    context.log.warning(f"❌ Readability failed: {e}")
         
         # Method 3: Custom Playwright extraction (Fallback)
         if page:
@@ -170,6 +184,20 @@ class HybridContentExtractor:
         try:
             print(f"🔍 Trying Newspaper3k extraction for: {url}")
             article = Article(url)
+            
+            # Configure headers to avoid 406 errors
+            article.set_headers({
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            })
+            
+            # Configure SSL verification bypass for problematic sites
+            article.config.verify_ssl = False
+            
             article.download()
             article.parse()
             
@@ -217,7 +245,20 @@ class HybridContentExtractor:
         """Extract content using Readability-lxml"""
         try:
             print(f"🔍 Trying Readability extraction for: {url}")
-            response = requests.get(url, timeout=30)
+            
+            # Configure headers to avoid 406 errors
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'DNT': '1',
+            }
+            
+            # Disable SSL verification for problematic sites
+            response = requests.get(url, headers=headers, timeout=30, verify=False)
             response.raise_for_status()
             
             doc = Document(response.text)

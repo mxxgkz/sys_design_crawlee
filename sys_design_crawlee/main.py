@@ -1,6 +1,6 @@
 import sys
-local_crawler_path = "/Users/karlzhang/Library/CloudStorage/OneDrive-Personal/Other/Live_Courses/BitTiger/Alg_Practice/Ind_Proj/crawlee-python-exp/src"
-sys.path.insert(0, local_crawler_path)
+# local_crawler_path = "/Users/karlzhang/Library/CloudStorage/OneDrive-Personal/Other/Live_Courses/BitTiger/Alg_Practice/Ind_Proj/crawlee-python-exp/src"
+# sys.path.insert(0, local_crawler_path)
 
 import logging
 import argparse
@@ -77,7 +77,7 @@ async def main(max_blogs: int = -1) -> None:
         max_requests_per_crawl=max_requests,  # Dynamic based on max_blogs parameter
         http_client=HttpxHttpClient(),
         # Increase timeout to prevent handler timeout
-        request_handler_timeout=timedelta(minutes=5),  # 5 minutes
+        request_handler_timeout=timedelta(minutes=10),  # 10 minutes
     )
 
     await crawler.run(

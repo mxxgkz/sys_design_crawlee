@@ -7,6 +7,7 @@ import asyncio
 from urllib.parse import urljoin, urlparse
 from pathlib import Path
 
+from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawlingContext
 from crawlee.router import Router
 from .hybrid_extractor import hybrid_extractor
@@ -876,7 +877,7 @@ async def execute_db_operation(operation_func, storage_dir, operation_name):
         """Synchronous database operation to be run in thread pool"""
         conn = sqlite3.connect(db_file_path)
         cursor = conn.cursor()
-        
+
         try:
             result = operation_func(cursor)
             conn.commit()
@@ -1059,13 +1060,20 @@ async def process_blog_content_directly(page, url, blog_info, context):
             
             for i, img_info in enumerate(final_result['images'][:10]):  # Limit to 10 images
                 try:
-                    img_path = await hybrid_extractor._process_image(img_info, images_dir, f"image_{i:03d}")
-                    if img_path:
+                    img_result = await hybrid_extractor._process_image(
+                        img_info.get('src', ''), 
+                        url, 
+                        i, 
+                        img_info.get('alt', '')
+                    )
+                    if img_result:
                         downloaded_images.append({
-                            'original_url': img_info.get('src', ''),
-                            'local_path': str(img_path),
-                            'alt_text': img_info.get('alt', ''),
-                            'caption': img_info.get('caption', '')
+                            'original_url': img_result.get('url', ''),
+                            'local_path': img_result.get('file_path', ''),
+                            'alt_text': img_result.get('alt_text', ''),
+                            'filename': img_result.get('filename', ''),
+                            'size': img_result.get('size', 0),
+                            'index': img_result.get('index', i)
                         })
                 except Exception as e:
                     context.log.warning(f'Failed to process image {i}: {e}')
@@ -1140,6 +1148,70 @@ async def process_blog_content_directly(page, url, blog_info, context):
         raise
 
 
+async def check_url_exists_in_database(url, storage_dir):
+    """Check if a URL already exists in the database."""
+    
+    def check_url(cursor):
+        """Check if URL exists in data table"""
+        cursor.execute('SELECT 1 FROM data WHERE url = ? LIMIT 1', (url,))
+        return cursor.fetchone() is not None
+    
+    def db_operation(cursor):
+        """Database operation to check URL existence"""
+        return check_url(cursor)
+    
+    try:
+        return await execute_db_operation(db_operation, storage_dir, "Check URL existence")
+    except Exception:
+        # If table doesn't exist or error occurs, assume URL doesn't exist
+        return False
+
+async def check_blog_extraction_status(url, storage_dir):
+    """Check if blog content extraction was successful for a URL."""
+    
+    def check_extraction_status(cursor):
+        """Check if blog content extraction was successful"""
+        # Check if URL exists in blog_content table with successful extraction
+        cursor.execute('''
+        SELECT extraction_quality, content_length 
+        FROM blog_content 
+        WHERE url = ? 
+        LIMIT 1
+        ''', (url,))
+        result = cursor.fetchone()
+        
+        if result is None:
+            return {'exists': False, 'successful': False, 'reason': 'no_record'}
+        
+        extraction_quality, content_length = result
+        
+        # Consider extraction successful if:
+        # 1. Quality is not 'failed'
+        # 2. Content length is reasonable (> 100 characters)
+        is_successful = (
+            extraction_quality != 'failed' and 
+            content_length and 
+            content_length > 100
+        )
+        
+        return {
+            'exists': True,
+            'successful': is_successful,
+            'quality': extraction_quality,
+            'content_length': content_length,
+            'reason': 'successful' if is_successful else 'failed_extraction'
+        }
+    
+    def db_operation(cursor):
+        """Database operation to check extraction status"""
+        return check_extraction_status(cursor)
+    
+    try:
+        return await execute_db_operation(db_operation, storage_dir, "Check blog extraction status")
+    except Exception as e:
+        # If table doesn't exist or error occurs, assume extraction failed
+        return {'exists': False, 'successful': False, 'reason': 'error', 'error': str(e)}
+
 async def save_single_record_to_database(record, storage_dir):
     """Save a single record to SQLite database with async I/O operations."""
     
@@ -1151,14 +1223,14 @@ async def save_single_record_to_database(record, storage_dir):
             title TEXT,
             tags TEXT,
             year TEXT,
-            url TEXT
+            url TEXT UNIQUE
         )
         ''')
-    
+
     def insert_record(cursor):
         """Insert the record into the data table"""
         cursor.execute(
-            'INSERT INTO data (company, title, tags, year, url) VALUES (?, ?, ?, ?, ?)', 
+            'INSERT OR IGNORE INTO data (company, title, tags, year, url) VALUES (?, ?, ?, ?, ?)', 
             (record['company'], record['title'], record['tags'], record['year'], record['url'])
         )
         return True
@@ -1242,17 +1314,25 @@ async def save_blog_content_to_database(blog_data, storage_dir):
     return await execute_db_operation(db_operation, storage_dir, "Blog content database insert")
 
 
-
-@router.default_handler
-async def default_handler(context: PlaywrightCrawlingContext) -> None:
-    """Default request handler - extracts blog URLs and enqueues them for content extraction."""
-    context.log.info(f'Processing {context.request.url} ...')
+async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
+    """Handle the main page - extract blog URLs and add them to queue."""
+    page = context.page
+    url = context.request.url
+    
+    context.log.info(f'📄 Processing main page: {url}')
+    
+    # Add random delay to avoid rate limiting
+    import random
+    await asyncio.sleep(random.uniform(1, 3))
+    
+    # Initialize tracking for deduplication
+    processed_urls = set()
+    new_blog_urls = []
     
     # # Call the load_more_handler to load all blog entries
     # await load_more_handler(context)
 
     # Wait for page to load and check for table elements
-    page = context.page
     await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME + 1000)  # Extra wait for table elements
     
     if DEBUG_MODE:
@@ -1301,7 +1381,7 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
     if data_count == 0:
         # Try to wait a bit more for dynamic content
         try:
-            await page.wait_for_selector('div[data-row-index]', timeout=5000)
+            await page.wait_for_selector('div[data-row-index]', timeout=10000)
             data_count = await data_elements.count()
             log_info(context, f'Found {data_count} table cells after waiting')
         except Exception:
@@ -1334,7 +1414,7 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
             try:
                 # Initialize a list to store the row data
                 row_data = []
-                
+
                 # Instead of finding all cells at once, target each column specifically
                 # This handles nested structures where columns might be at different depths
                 
@@ -1394,6 +1474,28 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
                     context.log.warning(f'Row {row_index} has no company, title, or URL, skipping')
                     continue
 
+                # Check for duplicates before processing
+                blog_url = row_data[4]
+                if blog_url:
+                    # Check if URL was already processed in this session
+                    if blog_url in processed_urls:
+                        context.log.info(f'🔄 Skipping duplicate URL (session): {blog_url}')
+                        continue
+                    
+                    # Check if blog content extraction was successful
+                    extraction_status = await check_blog_extraction_status(blog_url, 'storage')
+                    
+                    if extraction_status['successful']:
+                        context.log.info(f'✅ Skipping URL (successful extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
+                        continue
+                    elif extraction_status['exists']:
+                        context.log.info(f'🔄 Retrying URL (failed extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                    else:
+                        context.log.info(f'📝 New URL (no record): {blog_url} (reason: {extraction_status.get("reason", "unknown")})')
+                    
+                    # Mark URL as processed
+                    processed_urls.add(blog_url)
+
                 # Append the row data to the table
                 table.append(row_data)
 
@@ -1412,17 +1514,17 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
                 # Insert into database immediately (async I/O)
                 await save_single_record_to_database(data, 'storage')
                 
-                # Collect blog URLs for enqueuing
-                if row_data[4]:  # If URL exists
+                # Collect blog URLs for enqueuing (only new ones)
+                if blog_url:  # If URL exists and is new
                     blog_info = {
-                        'url': row_data[4],
+                        'url': blog_url,
                         'title': row_data[1],
                         'company': row_data[0],
                         'tags': row_data[2],
                         'year': row_data[3]
                     }
-                    blog_urls.append(blog_info)
-                    context.log.info(f'📝 Added to blog_urls: {blog_info["url"]} - {blog_info["title"]}')
+                    new_blog_urls.append(blog_info)
+                    context.log.info(f'📝 Added new blog URL: {blog_info["url"]} - {blog_info["title"]}')
                 
             except Exception as e:
                 context.log.error(f'Error processing row {row_index}: {e}')
@@ -1452,232 +1554,106 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
             context.log.warning('No table data found to save.')
     else:
         context.log.info('🚀 Table parsing disabled - focusing on enqueuing blog links')
-        blog_urls = []  # Initialize empty for enqueuing logic
+        new_blog_urls = []  # Initialize empty for enqueuing logic
 
     # Focus on enqueuing blog links directly
     context.log.info('🎯 Focusing on enqueuing blog links from data-col-index="4"')
     
-    # Enqueue blog URLs for content extraction
+    # Extract blog URLs from the table
     try:
-        # Debug: Check what links the selector finds
-        debug_links = page.locator('div[data-col-index="4"] a[href*="http"][target="_blank"]')
-        link_count = await debug_links.count()
-        context.log.info(f'🔍 Found {link_count} links matching selector')
+        # Find all blog links using the selector
+        blog_links = page.locator('div[data-col-index="4"] a')
+        link_count = await blog_links.count()
         
-        # Debug: Try different selectors to see what's available
-        simple_selector = page.locator('div[data-col-index="4"] a')
-        simple_count = await simple_selector.count()
-        context.log.info(f'🔍 Found {simple_count} links with simple selector (div[data-col-index="4"] a)')
+        context.log.info(f'🔍 Found {link_count} blog links on main page')
         
-        # Always use selector approach - enqueue_links is for finding links on current page
-        context.log.info(f'📊 Using selector approach to enqueue links from current page')
-        
-        # Enhanced debugging: Log ALL links found (not just first 3)
-        context.log.info('🔍 DEBUGGING: All links found by selector:')
-        all_links = []
-        for i in range(link_count):
-            try:
-                href = await debug_links.nth(i).get_attribute('href')
-                if href:
-                    all_links.append(href)
-                    # context.log.info(f'🔗 Link {i+1}: {href}')
-                else:
-                    context.log.warning(f'🔗 Link {i+1}: No href attribute found')
-            except Exception as e:
-                context.log.warning(f'🔗 Link {i+1}: Error getting href - {e}')
-        
-        context.log.info(f'📊 Total links found: {len(all_links)}')
-        # context.log.info(f'📊 Links to be enqueued: {all_links}')
-        
-        # Apply limit if specified
-        if MAX_BLOGS_TO_PROCESS > 0 and len(all_links) > MAX_BLOGS_TO_PROCESS:
-            limited_links = all_links[:MAX_BLOGS_TO_PROCESS]
-            # context.log.info(f'📊 Limited to {MAX_BLOGS_TO_PROCESS} links: {limited_links}')
-        else:
-            limited_links = all_links
-        
-        # Use selector approach - Crawlee will handle the enqueuing
-        # Note: We can't easily limit the selector, so we'll let Crawlee enqueue all found links
-        # The limit will be handled by the crawler's max_requests_per_crawl setting
-        context.log.info('🚀 Enqueuing links with selector (no manual limit applied)...')
-        
-        # Debug: Try different selectors to see which one works
-        context.log.info('🔍 Testing different selectors...')
-        
-        # Test 1: Simple selector
-        simple_test = page.locator('div[data-col-index="4"] a')
-        # simple_test = page.locator('div.notion-table-view *')
-        simple_count = await simple_test.count()
-        context.log.info(f'🔍 Simple selector (div[data-col-index="4"] a): {simple_count} links')
-        
-        # Test 2: With http filter
-        http_test = page.locator('div[data-col-index="4"] a[href*="http"]')
-        http_count = await http_test.count()
-        context.log.info(f'🔍 HTTP filter (div[data-col-index="4"] a[href*="http"]): {http_count} links')
-        
-        # Test 3: With target filter
-        target_test = page.locator('div[data-col-index="4"] a[target="_blank"]')
-        target_count = await target_test.count()
-        context.log.info(f'🔍 Target filter (div[data-col-index="4"] a[target="_blank"]): {target_count} links')
-        
-        # Test 4: Combined filter
-        combined_test = page.locator('div[data-col-index="4"] a[href*="http"][target="_blank"]')
-        combined_count = await combined_test.count()
-        context.log.info(f'🔍 Combined filter (div[data-col-index="4"] a[href*="http"][target="_blank"]): {combined_count} links')
-        
-        # Use the selector that finds the most links
-        if combined_count > 0:
-            selector_to_use = 'div[data-col-index="4"] a[href*="http"][target="_blank"]'
-            context.log.info(f'🔍 Using combined selector: {selector_to_use}')
-        elif http_count > 0:
-            selector_to_use = 'div[data-col-index="4"] a[href*="http"]'
-            context.log.info(f'🔍 Using HTTP selector: {selector_to_use}')
-        elif simple_count > 0:
-            selector_to_use = 'div[data-col-index="4"] a'
-            # selector_to_use = 'div.notion-table-view *'
-            context.log.info(f'🔍 Using simple selector: {selector_to_use}')
-        else:
-            context.log.error('❌ No links found with any selector!')
+        if link_count == 0:
+            context.log.warning('No blog links found on main page')
             return
         
-        # selector_to_use = 'div.notion-table-view *'
-        selector_to_use = 'div[data-col-index="4"] a'
-        try:
-            # Debug: Log what we're about to enqueue
-            context.log.info(f'🔍 About to enqueue with selector: {selector_to_use}')
-            context.log.info(f'🔍 Strategy: all (should enqueue external links)')
-            
-            await context.enqueue_links(
-                selector=selector_to_use,  # Uncommented!
-                label='BLOG',  # Changed back to blog_content
-                strategy='all',
-            )
-            context.log.info(f'✅ Successfully enqueued tech blog URLs using selector: {selector_to_use}')
-            
-            # Debug: Check if any requests were actually added to the queue
-            context.log.info('🔍 DEBUGGING: Checking if requests were enqueued...')
-            context.log.info('🔍 If blog_content_handler is not called for external links,')
-            context.log.info('🔍 it might be due to Crawlee filtering or configuration issues.')
-            
-        except Exception as enqueue_error:
-            context.log.error(f'❌ Error during enqueue_links: {enqueue_error}')
-            raise
-        # Additional debugging: Check what was actually enqueued
-        context.log.info('🔍 DEBUGGING: Checking request queue after enqueuing...')
-        try:
-            # This will help us verify what was actually enqueued
-            context.log.info('📋 Enqueuing completed - blog_content_handler should be called for each URL')
-        except Exception as debug_error:
-            context.log.warning(f'Debug check failed: {debug_error}')
+        # Extract URLs and metadata with deduplication
+        blog_requests = []
+        limit = MAX_BLOGS_TO_PROCESS if MAX_BLOGS_TO_PROCESS > 0 else link_count
+        for i in range(min(link_count, limit)):
+            try:
+                # Get the link element
+                link_element = blog_links.nth(i)
+                href = await link_element.get_attribute('href')
+                
+                if href:
+                    # Check for duplicates before enqueuing
+                    if href in processed_urls:
+                        context.log.info(f'🔄 Skipping duplicate URL (session): {href}')
+                        continue
+                    
+                    # Check if blog content extraction was successful
+                    extraction_status = await check_blog_extraction_status(href, 'storage')
+                    
+                    if extraction_status['successful']:
+                        context.log.info(f'✅ Skipping URL (successful extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
+                        continue
+                    elif extraction_status['exists']:
+                        context.log.info(f'🔄 Retrying URL (failed extraction): {href} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
+                    else:
+                        context.log.info(f'📝 New URL (no record): {href} (reason: {extraction_status.get("reason", "unknown")})')
+                    
+                    # Mark URL as processed
+                    processed_urls.add(href)
+                    
+                    # Check if it's a PDF URL and handle immediately
+                    if (href.lower().endswith('.pdf') or 
+                        '/pdf/' in href.lower() or 
+                        'arxiv.org/pdf' in href.lower()):
+                        context.log.info(f'📄 Processing PDF immediately: {href}')
+                        await handle_pdf_url_directly(href, context)
+                    else:
+                        request = Request.from_url(href, user_data={'label': 'BLOG'})
+                        context.log.info(f'📝 Added blog request: {href}')
+                        blog_requests.append(request)
+                
+            except Exception as e:
+                context.log.warning(f'Error processing link {i}: {e}')
+                continue
         
+        # Add all blog requests to the queue
+        if blog_requests:
+            await context.add_requests(requests=blog_requests, strategy='all')
+            context.log.info(f'✅ Added {len(blog_requests)} new blog requests to queue')
+        else:
+            context.log.warning('No new blog URLs found to add to queue')
+            
     except Exception as e:
-        context.log.error(f'❌ Error enqueuing URLs: {e}')
-        context.log.warning('Failed to enqueue blog links')
+        context.log.error(f'Error processing main page: {e}')
 
-@router.handler('BLOG')
-async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
-    """Handler for extracting content from individual blog posts using hybrid approach."""
+
+async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
+    """Handle blog content extraction using hybrid approach."""
     page = context.page
     url = context.request.url
-    user_data = context.request.user_data or {}
     
-    # Enhanced debugging: Log the URL being processed
-    context.log.info('🎯' * 60)
-    context.log.info(f'🎯 blog_content_handler CALLED!')
-    context.log.info(f'🎯 Processing URL: {url}')
-    context.log.info(f'🎯 Request label: {context.request.label}')
-    context.log.info(f'🎯 User data: {user_data}')
-    context.log.info(f'🎯 Current page URL: {page.url}')
-    context.log.info(f'🎯 Is PDF URL: {url.lower().endswith(".pdf") or "/pdf/" in url.lower() or "arxiv.org/pdf" in url.lower()}')
-    context.log.info('🎯' * 60)
+    context.log.info(f'🔍 Processing blog content: {url}')
     
-    if "educatum.com" in url:
-        context.log.info(f'📄 Detected Educatum URL: {url}')
-        # Handle Educatum directly without content extraction
-        return
-    
-    # Check if this is a PDF URL (enhanced detection)
-    if (url.lower().endswith('.pdf') or 
-        '/pdf/' in url.lower() or 
-        'arxiv.org/pdf' in url.lower()):
-        context.log.info(f'📄 Detected PDF URL: {url}')
-        # Handle PDF directly without content extraction
+    try:
+        # Extract metadata from URL
         try:
-            # Extract basic metadata from URL
             from urllib.parse import urlparse
             domain = urlparse(url).netloc
             company = domain.replace('www.', '').split('.')[0].title()
-            title = f"PDF Document from {company}"
+            title = await page.title() or 'Unknown Title'
             
-            # Generate unique PDF ID
-            pdf_id = hybrid_extractor.generate_blog_id(url, title)
-            
-            # Create storage directories
-            storage_dir = Path('storage')
-            pdfs_dir = storage_dir / 'pdfs'
-            pdfs_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Download PDF
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        # Save PDF file
-                        pdf_filename = f"{pdf_id}_{sanitize_filename(title[:50])}.pdf"
-                        pdf_file_path = pdfs_dir / pdf_filename
-                        
-                        with open(pdf_file_path, 'wb') as f:
-                            async for chunk in response.content.iter_chunked(8192):
-                                f.write(chunk)
-                        
-                        # Get file size
-                        file_size = pdf_file_path.stat().st_size
-                        
-                        # Save metadata to database
-                        await save_pdf_metadata_to_database(
-                            pdf_id, title, company, '', '', url,
-                            str(pdf_file_path), file_size, context
-                        )
-                        
-                        context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
-                    else:
-                        context.log.error(f'❌ Failed to download PDF: {url} (Status: {response.status})')
+            context.log.info(f'🔍 Processing blog: {title} by {company}')
         except Exception as e:
-            context.log.error(f'❌ Error processing PDF {url}: {e}')
-        return
-    
-    # Extract metadata directly from the blog post
-    try:
-        # Get title from page
-        title = await page.title()
-        if not title or title.strip() == '':
+            context.log.warning(f'Error extracting metadata: {e}')
             title = 'Unknown Title'
+            company = 'Unknown Company'
         
-        # Extract company from URL domain
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc
-        company = domain.replace('www.', '').split('.')[0].title()
+        # Generate unique blog ID
+        blog_id = hybrid_extractor.generate_blog_id(url, title)
         
-        # Default values for tags and year (can be extracted later if needed)
-        tags = ''
-        year = ''
+        # Wait for page to load
+        await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME)
         
-        context.log.info(f'🔍 Hybrid extraction for blog: {title} by {company}')
-    except Exception as e:
-        context.log.warning(f'Error extracting basic metadata: {e}')
-        title = 'Unknown Title'
-        company = 'Unknown Company'
-        tags = ''
-        year = ''
-    
-    # Generate unique blog ID
-    blog_id = hybrid_extractor.generate_blog_id(url, title)
-    
-    # Wait for page to load
-    await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME)
-    
-    try:
-        # Use hybrid extraction with multiple fallback strategies
+        # Use hybrid extraction
         extraction_results = await hybrid_extractor.extract_content_hybrid(url, page, context)
         
         # Log extraction results
@@ -1686,16 +1662,10 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
         context.log.info(f'  - Methods successful: {", ".join(extraction_results["methods_successful"])}')
         context.log.info(f'  - Extraction quality: {extraction_results["extraction_quality"]}')
         
-        if extraction_results['errors']:
-            context.log.warning(f'  - Errors encountered: {len(extraction_results["errors"])}')
-            for error in extraction_results['errors'][:3]:  # Show first 3 errors
-                context.log.warning(f'    * {error}')
-        
         # Get final result
         final_result = extraction_results['final_result']
         if not final_result or not final_result.get('text') or final_result.get('text') == 'EXTRACTION_FAILED_ALL_METHODS':
-            context.log.warning(f'❌ No content extracted from {url} using any method')
-            # Save extraction log for analysis
+            context.log.warning(f'❌ No content extracted from {url}')
             hybrid_extractor.save_extraction_log(url, extraction_results, context)
             return
         
@@ -1711,17 +1681,13 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
         with open(text_file_path, 'w', encoding='utf-8') as f:
             f.write(f"Title: {title}\n")
             f.write(f"Company: {company}\n")
-            f.write(f"Tags: {tags}\n")
-            f.write(f"Year: {year}\n")
             f.write(f"URL: {url}\n")
             f.write(f"Blog ID: {blog_id}\n")
             f.write(f"Extraction Method: {final_result.get('extraction_method', 'unknown')}\n")
             f.write("=" * 80 + "\n\n")
             f.write(final_result.get('text', ''))
         
-        context.log.info(f'💾 Saved text content to: {text_file_path}')
-        
-        # Process images from hybrid extraction
+        # Process images
         downloaded_images = []
         images_info = final_result.get('images', [])
         
@@ -1729,11 +1695,8 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
             images_dir = blog_dir / 'images'
             images_dir.mkdir(exist_ok=True)
             
-            context.log.info(f'🖼️ Found {len(images_info)} images to process')
-            
             for img_info in images_info:
                 try:
-                    # Images are already downloaded by hybrid extractor
                     downloaded_images.append({
                         'filename': img_info.get('filename', 'unknown'),
                         'original_url': img_info.get('url', ''),
@@ -1742,20 +1705,14 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
                         'size': img_info.get('size', 0),
                         'index': img_info.get('index', 0)
                     })
-                    
-                    context.log.info(f'✅ Processed image: {img_info.get("filename", "unknown")}')
-                    
                 except Exception as e:
                     context.log.error(f'Error processing image: {e}')
-                    continue
         
-        # Create enhanced metadata file
+        # Create metadata
         metadata = {
             'blog_id': blog_id,
             'title': title,
             'company': company,
-            'tags': tags,
-            'year': year,
             'url': url,
             'text_file': text_filename,
             'images': downloaded_images,
@@ -1764,16 +1721,8 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
             'extraction_info': {
                 'hybrid_methods_tried': extraction_results['methods_tried'],
                 'hybrid_methods_successful': extraction_results['methods_successful'],
-                'hybrid_methods_failed': extraction_results['methods_failed'],
                 'extraction_quality': extraction_results['extraction_quality'],
-                'final_method': final_result.get('extraction_method', 'unknown'),
-                'extraction_timestamp': context.request.started_at.isoformat() if hasattr(context.request, 'started_at') else None
-            },
-            'hybrid_extraction_results': extraction_results,  # Full extraction results
-            'correlation_data': {
-                'has_images': len(downloaded_images) > 0,
-                'has_embedded_links': 'http' in final_result.get('text', ''),
-                'extraction_successful': extraction_results['extraction_quality'] != 'failed'
+                'final_method': final_result.get('extraction_method', 'unknown')
             }
         }
         
@@ -1782,33 +1731,40 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
         with open(metadata_file, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         
-        # Save extraction log for analysis
+        # Save extraction log
         hybrid_extractor.save_extraction_log(url, extraction_results, context)
         
-        # Create shared blog data structures
-        blog_data, dataset_data = create_blog_data_structures(
-            blog_id, title, company, tags, year, url, final_result,
-            downloaded_images, text_file_path, blog_dir, metadata_file, extraction_results
-        )
+        # Create blog data for database
+        blog_data = {
+            'blog_id': blog_id,
+            'title': title,
+            'company': company,
+            'tags': '',
+            'year': '',
+            'url': url,
+            'content_length': len(final_result.get('text', '')),
+            'image_count': len(downloaded_images),
+            'text_file_path': str(text_file_path),
+            'images_dir_path': str(blog_dir / 'images'),
+            'extraction_method': final_result.get('extraction_method', 'unknown'),
+            'extraction_quality': extraction_results['extraction_quality'],
+            'has_images': len(downloaded_images) > 0,
+            'has_embedded_links': 'http' in final_result.get('text', '')
+        }
         
         # Save to database and push to dataset
         await save_blog_content_to_database(blog_data, 'storage')
-        await context.push_data(dataset_data)
+        await context.push_data(blog_data)
         
         context.log.info(f'✅ Successfully processed blog: {title} (ID: {blog_id})')
         context.log.info(f'  - Content length: {len(final_result.get("text", ""))} characters')
         context.log.info(f'  - Images processed: {len(downloaded_images)}')
         context.log.info(f'  - Extraction method: {final_result.get("extraction_method", "unknown")}')
         context.log.info(f'  - Quality: {extraction_results["extraction_quality"]}')
-        context.log.info(f'  - Saved to: {blog_dir}')
-        context.log.info(f'  - Database: Blog metadata saved to SQLite')
-        
-        if extraction_results['errors']:
-            context.log.warning(f'  - Had {len(extraction_results["errors"])} extraction issues (saved for analysis)')
         
     except Exception as e:
         context.log.error(f'❌ Error processing blog content from {url}: {e}')
-        # Save extraction log even for failed extractions
+        # Save extraction log for failed extractions
         try:
             failed_results = {
                 'url': url,
@@ -1822,4 +1778,348 @@ async def blog_content_handler(context: PlaywrightCrawlingContext) -> None:
             hybrid_extractor.save_extraction_log(url, failed_results, context)
         except Exception as save_error:
             context.log.error(f'Failed to save extraction log: {save_error}')
-        raise
+    
+    except Exception as e:
+        context.log.error(f'❌ Error in handle_blog_content for {url}: {e}')
+        context.log.warning(f'⚠️ Skipping blog content extraction due to error: {e}')
+
+
+async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) -> None:
+    """Handle PDF URL directly without going through Playwright navigation."""
+    context.log.info(f'📄 Processing PDF directly: {url}')
+    
+    try:
+        # Extract basic metadata from URL
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        
+        # Special handling for arXiv URLs
+        if 'arxiv.org' in domain:
+            # Extract arXiv ID from URL for better title
+            arxiv_id = url.split('/')[-1].replace('.pdf', '')
+            title = f"arXiv Paper {arxiv_id}"
+            company = "arXiv"
+        else:
+            company = domain.replace('www.', '').split('.')[0].title()
+            title = f"PDF Document from {company}"
+        
+        # Generate unique PDF ID
+        pdf_id = hybrid_extractor.generate_blog_id(url, title)
+        
+        # Create storage directories
+        storage_dir = Path('storage')
+        pdfs_dir = storage_dir / 'pdfs'
+        pdfs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Download PDF with retry logic and better headers
+        import aiohttp
+        import random
+        import time
+        
+        # Random delay to avoid rate limiting
+        await asyncio.sleep(random.uniform(1, 3))
+        
+        # Different headers for different domains
+        if 'arxiv.org' in domain:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,application/octet-stream,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Referer': 'https://arxiv.org/',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        else:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,application/octet-stream,*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                    context.log.info(f'📥 Attempting to download PDF (attempt {attempt + 1}/{max_retries}): {url}')
+                    
+                    # For arXiv, first visit the abstract page to establish session
+                    if 'arxiv.org' in domain and attempt == 0:
+                        try:
+                            # Convert PDF URL to abstract URL
+                            abstract_url = url.replace('/pdf/', '/abs/').replace('.pdf', '')
+                            context.log.info(f'📄 Visiting abstract page first: {abstract_url}')
+                            
+                            async with session.get(abstract_url) as abstract_response:
+                                if abstract_response.status == 200:
+                                    context.log.info(f'✅ Abstract page visited successfully')
+                                    await asyncio.sleep(1)  # Brief pause
+                                else:
+                                    context.log.warning(f'⚠️ Abstract page returned {abstract_response.status}')
+                        except Exception as e:
+                            context.log.warning(f'⚠️ Could not visit abstract page: {e}')
+                    
+                    async with session.get(url) as response:
+                        context.log.info(f'📊 Response status: {response.status} for {url}')
+                        
+                        if response.status == 200:
+                            # Check content type
+                            content_type = response.headers.get('content-type', '')
+                            context.log.info(f'📊 Content-Type: {content_type}')
+                            
+                            # Check if it's actually a PDF
+                            if 'application/pdf' in content_type or url.endswith('.pdf') or 'arxiv.org/pdf' in url:
+                                # Save PDF file
+                                pdf_filename = f"{pdf_id}_{sanitize_filename(title[:50])}.pdf"
+                                pdf_file_path = pdfs_dir / pdf_filename
+                                
+                                with open(pdf_file_path, 'wb') as f:
+                                    async for chunk in response.content.iter_chunked(8192):
+                                        f.write(chunk)
+                                
+                                # Get file size
+                                file_size = pdf_file_path.stat().st_size
+                                context.log.info(f'📊 Downloaded {file_size:,} bytes to {pdf_file_path}')
+                                
+                                # Verify it's a valid PDF by checking file size and magic bytes
+                                if file_size > 1000:  # PDFs should be at least 1KB
+                                    with open(pdf_file_path, 'rb') as f:
+                                        magic_bytes = f.read(4)
+                                        if magic_bytes == b'%PDF':
+                                            context.log.info(f'✅ Valid PDF detected (magic bytes: {magic_bytes})')
+                                        else:
+                                            context.log.warning(f'⚠️ File may not be a valid PDF (magic bytes: {magic_bytes})')
+                                
+                                # Save metadata to database
+                                await save_pdf_metadata_to_database(
+                                    pdf_id, title, company, '', '', url,
+                                    str(pdf_file_path), file_size, context
+                                )
+                                
+                                context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
+                                return  # Success, exit the function
+                            else:
+                                context.log.warning(f'⚠️ Response is not a PDF (Content-Type: {content_type})')
+                        else:
+                            context.log.warning(f'⚠️ HTTP {response.status} for PDF: {url}')
+                            
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                            
+            except Exception as e:
+                context.log.warning(f'⚠️ Download attempt {attempt + 1} failed: {e}')
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                else:
+                    raise e
+        
+        # If we get here, all retries failed
+        context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url}')
+        context.log.warning(f'💡 This might be due to IP blocking or rate limiting')
+                    
+    except Exception as e:
+        context.log.error(f'❌ Error processing PDF {url}: {e}')
+        context.log.warning(f'💡 PDF download failed - this is common when IP gets blocked')
+
+
+async def handle_pdf_content(context: PlaywrightCrawlingContext) -> None:
+    """Handle PDF content - download and save metadata with better error handling."""
+    # Don't use the page object for PDFs to avoid navigation issues
+    url = context.request.url
+    
+    try:
+        # Extract basic metadata from URL
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        
+        # Special handling for arXiv URLs
+        if 'arxiv.org' in domain:
+            # Extract arXiv ID from URL for better title
+            arxiv_id = url.split('/')[-1].replace('.pdf', '')
+            title = f"arXiv Paper {arxiv_id}"
+            company = "arXiv"
+        else:
+            company = domain.replace('www.', '').split('.')[0].title()
+            title = f"PDF Document from {company}"
+        
+        # Generate unique PDF ID
+        pdf_id = hybrid_extractor.generate_blog_id(url, title)
+        
+        # Create storage directories
+        storage_dir = Path('storage')
+        pdfs_dir = storage_dir / 'pdfs'
+        pdfs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Download PDF with retry logic and better headers
+        import aiohttp
+        import random
+        import time
+        
+        # Random delay to avoid rate limiting
+        await asyncio.sleep(random.uniform(1, 3))
+        
+        # Different headers for different domains
+        if 'arxiv.org' in domain:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,application/octet-stream,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Referer': 'https://arxiv.org/',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        else:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,application/octet-stream,*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                    context.log.info(f'📥 Attempting to download PDF (attempt {attempt + 1}/{max_retries}): {url}')
+                    
+                    # For arXiv, first visit the abstract page to establish session
+                    if 'arxiv.org' in domain and attempt == 0:
+                        try:
+                            # Convert PDF URL to abstract URL
+                            abstract_url = url.replace('/pdf/', '/abs/').replace('.pdf', '')
+                            context.log.info(f'📄 Visiting abstract page first: {abstract_url}')
+                            
+                            async with session.get(abstract_url) as abstract_response:
+                                if abstract_response.status == 200:
+                                    context.log.info(f'✅ Abstract page visited successfully')
+                                    await asyncio.sleep(1)  # Brief pause
+                                else:
+                                    context.log.warning(f'⚠️ Abstract page returned {abstract_response.status}')
+                        except Exception as e:
+                            context.log.warning(f'⚠️ Could not visit abstract page: {e}')
+                    
+                    async with session.get(url) as response:
+                        context.log.info(f'📊 Response status: {response.status} for {url}')
+                        context.log.info(f'📊 Response headers: {dict(response.headers)}')
+                        
+                        if response.status == 200:
+                            # Check content type
+                            content_type = response.headers.get('content-type', '')
+                            context.log.info(f'📊 Content-Type: {content_type}')
+                            
+                            # Check if it's actually a PDF
+                            if 'application/pdf' in content_type or url.endswith('.pdf') or 'arxiv.org/pdf' in url:
+                                # Save PDF file
+                                pdf_filename = f"{pdf_id}_{sanitize_filename(title[:50])}.pdf"
+                                pdf_file_path = pdfs_dir / pdf_filename
+                                
+                                with open(pdf_file_path, 'wb') as f:
+                                    async for chunk in response.content.iter_chunked(8192):
+                                        f.write(chunk)
+                                
+                                # Get file size
+                                file_size = pdf_file_path.stat().st_size
+                                context.log.info(f'📊 Downloaded {file_size:,} bytes to {pdf_file_path}')
+                                
+                                # Verify it's a valid PDF by checking file size and magic bytes
+                                if file_size > 1000:  # PDFs should be at least 1KB
+                                    with open(pdf_file_path, 'rb') as f:
+                                        magic_bytes = f.read(4)
+                                        if magic_bytes == b'%PDF':
+                                            context.log.info(f'✅ Valid PDF detected (magic bytes: {magic_bytes})')
+                                        else:
+                                            context.log.warning(f'⚠️ File may not be a valid PDF (magic bytes: {magic_bytes})')
+                                
+                                # Save metadata to database
+                                await save_pdf_metadata_to_database(
+                                    pdf_id, title, company, '', '', url,
+                                    str(pdf_file_path), file_size, context
+                                )
+                                
+                                context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
+                                return  # Success, exit the function
+                            else:
+                                context.log.warning(f'⚠️ Response is not a PDF (Content-Type: {content_type})')
+                                # Log first few bytes to see what we got
+                                try:
+                                    content_preview = await response.text()
+                                    context.log.warning(f'⚠️ Response preview: {content_preview[:200]}...')
+                                except:
+                                    context.log.warning(f'⚠️ Could not read response content')
+                        else:
+                            context.log.warning(f'⚠️ HTTP {response.status} for PDF: {url}')
+                            # Log response content for debugging
+                            try:
+                                response_text = await response.text()
+                                context.log.warning(f'⚠️ Response content: {response_text[:500]}...')
+                            except:
+                                context.log.warning(f'⚠️ Could not read response content')
+                            
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                            
+            except Exception as e:
+                context.log.warning(f'⚠️ Download attempt {attempt + 1} failed: {e}')
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                else:
+                    raise e
+        
+        # If we get here, all retries failed
+        context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url}')
+        context.log.warning(f'💡 This might be due to IP blocking or rate limiting')
+        context.log.warning(f'💡 Try running the crawler later or from a different network')
+                    
+    except Exception as e:
+        context.log.error(f'❌ Error processing PDF {url}: {e}')
+        context.log.warning(f'💡 PDF download failed - this is common when IP gets blocked')
+
+
+@router.default_handler
+async def default_handler(context: PlaywrightCrawlingContext) -> None:
+    """Default request handler - handles both main page and blog content extraction."""
+    page = context.page
+    url = context.request.url
+    
+    # Get request label to determine handling
+    request_label = getattr(context.request.user_data, 'label', None)
+    
+    context.log.info(f'🎯 Processing {url} with label: {request_label}')
+    
+    try:
+        # Route based on label
+        if request_label == 'PDF':
+            # Handle PDF content extraction
+            await handle_pdf_content(context)
+        elif request_label == 'BLOG':
+            # Handle blog content extraction
+            await handle_blog_content(context)
+        else:
+            # Handle main page - extract blog URLs and add them to queue
+            await handle_main_page(context)
+    except Exception as e:
+        context.log.error(f'❌ Error in default_handler for {url}: {e}')
+        # Don't re-raise the exception to prevent retry loops
+        # Just log the error and continue
+        context.log.warning(f'⚠️ Skipping {url} due to error: {e}')
+
