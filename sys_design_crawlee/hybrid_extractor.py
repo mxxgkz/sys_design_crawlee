@@ -195,6 +195,65 @@ class HybridContentExtractor:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
+    
+    def _extract_content_manually(self, html_content: str) -> Optional[str]:
+        """
+        Manually extract content from HTML using BeautifulSoup when automated methods fail.
+        
+        Args:
+            html_content: Raw HTML content as string
+            
+        Returns:
+            Extracted text content or None if extraction fails
+        """
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Try different content selectors in order of preference
+            content_selectors = [
+                'main', '.post-content', '.entry-content', 
+                '.blog-content', '.content', '[role="main"]', 
+                '.post-body', '.article-body', '.blog-post', 
+                '.post', '.entry', '.markdown-body', '.blog-article',
+                '.post-content-wrapper', '.content-wrapper',
+                'article',  # Move article later as it might be too broad
+                '.blog-post-content', '.article-content',
+                '.post-text', '.entry-text', '.content-text'
+            ]
+            
+            for selector in content_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    text_content = ' '.join([elem.get_text(strip=True) for elem in elements])
+                    if len(text_content) > 100:
+                        print(f"🔍 Found content with selector '{selector}': {len(text_content)} chars")
+                        return text_content
+            
+            # If no specific selectors work, try to extract from common text containers
+            text_containers = soup.find_all(['div', 'section'], class_=re.compile(r'(content|post|article|blog|entry)', re.I))
+            if text_containers:
+                text_content = ' '.join([elem.get_text(strip=True) for elem in text_containers])
+                if len(text_content) > 100:
+                    print(f"🔍 Found content with text containers: {len(text_content)} chars")
+                    return text_content
+            
+            # Last resort: try to find the largest text block
+            all_text_elements = soup.find_all(['p', 'div', 'span'], string=True)
+            if all_text_elements:
+                # Filter out very short text (likely navigation/meta)
+                meaningful_texts = [elem.get_text(strip=True) for elem in all_text_elements 
+                                 if len(elem.get_text(strip=True)) > 20]
+                if meaningful_texts:
+                    text_content = ' '.join(meaningful_texts)
+                    if len(text_content) > 500:  # Only if we get substantial content
+                        print(f"🔍 Found content with text elements: {len(text_content)} chars")
+                        return text_content
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ Manual extraction failed: {e}")
+            return None
 
     async def _extract_with_newspaper(self, url: str) -> Optional[Dict[str, Any]]:
         """Extract content using Newspaper3k with SSL bypass"""
@@ -235,7 +294,20 @@ class HybridContentExtractor:
             # Check if we got any content
             if not article.text or len(article.text.strip()) < 50:
                 print(f"⚠️ Newspaper3k: Insufficient content ({len(article.text)} chars)")
-                return None
+                print(f"🔍 Debug: Article title: {article.title}")
+                print(f"🔍 Debug: Article authors: {article.authors}")
+                print(f"🔍 Debug: Article publish_date: {article.publish_date}")
+                print(f"🔍 Debug: Article top_image: {article.top_image}")
+                print(f"🔍 Debug: Article images count: {len(article.images) if article.images else 0}")
+                
+                # Try to extract content manually from HTML
+                manual_content = self._extract_content_manually(html_content)
+                if manual_content:
+                    article.text = manual_content
+                    print(f"✅ Manual extraction successful: {len(article.text)} chars")
+                else:
+                    print(f"⚠️ Manual extraction also failed")
+                    return None
             
             print(f"✅ Newspaper3k: Found {len(article.text)} characters of content")
             
@@ -401,6 +473,11 @@ class HybridContentExtractor:
     async def _process_image(self, img_url: str, base_url: str, index: int, alt_text: str = "") -> Optional[Dict[str, Any]]:
         """Process and download an image"""
         try:
+            # Skip data URLs (inline images like SVG, base64, etc.)
+            if img_url.startswith('data:'):
+                print(f"⏭️ Skipping data URL image: {img_url[:50]}...")
+                return None
+            
             # Make URL absolute
             if img_url.startswith('//'):
                 img_url = 'https:' + img_url

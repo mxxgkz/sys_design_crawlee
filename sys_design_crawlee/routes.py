@@ -24,6 +24,12 @@ ENABLE_TABLE_PARSING = False  # -1 means no limit
 # Flag to force re-extraction of blog content even if previously extracted successfully
 FORCE_REEXTRACT_BLOGS = True  # Set to True to re-extract all blogs regardless of previous status
 
+# Global counters for tracking success/failure rates
+PDF_SUCCESS_COUNT = 0
+PDF_FAILURE_COUNT = 0
+BLOG_SUCCESS_COUNT = 0
+BLOG_FAILURE_COUNT = 0
+
 # Simplified logging helper
 def log_with_emoji(context, emoji, message, details=""):
     """Unified logging helper with emoji prefix"""
@@ -31,6 +37,7 @@ def log_with_emoji(context, emoji, message, details=""):
     if details:
         full_message += f" - {details}"
     context.log.info(full_message)
+
 
 async def try_button_click(page, button, click_methods, context):
     """Try multiple click methods on a button with logging"""
@@ -136,7 +143,15 @@ BLOG_CONTENT_SELECTORS = [
     '.post-body',
     '.article-body',
     '.ql-editor',  # LinkedIn specific
-    '.blog-post-content'  # LinkedIn specific
+    '.blog-post-content',  # LinkedIn specific
+    '.blog-post',  # GitLab specific
+    '.post',  # Generic blog post
+    '.entry',  # Generic entry
+    '.markdown-body',  # Markdown content
+    '[data-testid="blog-post-content"]',  # GitLab test ID
+    '.blog-article',  # GitLab blog article
+    '.post-content-wrapper',  # GitLab wrapper
+    '.content-wrapper'  # Generic content wrapper
 ]
 
 # Image extraction constants - enhanced for LinkedIn and other tech blogs
@@ -710,6 +725,11 @@ def create_text_image_mapping(content_text: str, images: list[dict]) -> dict:
 async def download_image(page, image_url: str, image_path: str, context: PlaywrightCrawlingContext) -> bool:
     """Download an image from URL to the specified path."""
     try:
+        # Skip data URLs (inline images like SVG, base64, etc.)
+        if image_url.startswith('data:'):
+            context.log.info(f'⏭️ Skipping data URL image: {image_url[:50]}...')
+            return False
+        
         # Use Playwright's request context to download the image
         response = await page.request.get(image_url)
         
@@ -1093,7 +1113,10 @@ async def process_blog_content_directly(page, url, blog_info, context):
         await save_blog_content_to_database(blog_data, 'storage')
         await context.push_data(dataset_data)
         
-        context.log.info(f'✅ Successfully processed blog: {title} (ID: {blog_id})')
+        # Track blog success
+        global BLOG_SUCCESS_COUNT
+        BLOG_SUCCESS_COUNT += 1
+        context.log.info(f'✅ Successfully processed blog: {title} (ID: {blog_id}) [BLOG #{BLOG_SUCCESS_COUNT}]')
         context.log.info(f'  - Content length: {len(final_result.get("text", ""))} characters')
         context.log.info(f'  - Images processed: {len(downloaded_images)}')
         context.log.info(f'  - Extraction method: {final_result.get("extraction_method", "unknown")}')
@@ -1105,7 +1128,11 @@ async def process_blog_content_directly(page, url, blog_info, context):
             context.log.warning(f'  - Had {len(extraction_results["errors"])} extraction issues (saved for analysis)')
         
     except Exception as e:
-        context.log.error(f'❌ Error processing blog content from {url}: {e}')
+        # Track blog failure
+        global BLOG_FAILURE_COUNT
+        BLOG_FAILURE_COUNT += 1
+        context.log.error(f'❌ Error processing blog content from {url}: {e} [BLOG FAIL #{BLOG_FAILURE_COUNT}]')
+        
         # Save extraction log even for failed extractions
         try:
             failed_results = {
@@ -1524,7 +1551,7 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                 with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerows(table)
-                
+        
                 # Database records are already saved individually during processing
                 # CSV file serves as a backup/analysis file
                 context.log.info(f'Data saved to {storage_dir}/ - {len(table)} rows processed (database records saved individually, CSV created for backup)')
@@ -1741,14 +1768,21 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
         await save_blog_content_to_database(blog_data, 'storage')
         await context.push_data(blog_data)
         
-        context.log.info(f'✅ Successfully processed blog: {title} (ID: {blog_id})')
+        # Track blog success
+        global BLOG_SUCCESS_COUNT
+        BLOG_SUCCESS_COUNT += 1
+        context.log.info(f'✅ Successfully processed blog: {title} (ID: {blog_id}) [BLOG #{BLOG_SUCCESS_COUNT}]')
         context.log.info(f'  - Content length: {len(final_result.get("text", ""))} characters')
         context.log.info(f'  - Images processed: {len(downloaded_images)}')
         context.log.info(f'  - Extraction method: {final_result.get("extraction_method", "unknown")}')
         context.log.info(f'  - Quality: {extraction_results["extraction_quality"]}')
         
     except Exception as e:
-        context.log.error(f'❌ Error processing blog content from {url}: {e}')
+        # Track blog failure
+        global BLOG_FAILURE_COUNT
+        BLOG_FAILURE_COUNT += 1
+        context.log.error(f'❌ Error processing blog content from {url}: {e} [BLOG FAIL #{BLOG_FAILURE_COUNT}]')
+        
         # Save extraction log for failed extractions
         try:
             failed_results = {
@@ -1763,10 +1797,6 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
             hybrid_extractor.save_extraction_log(url, failed_results, context)
         except Exception as save_error:
             context.log.error(f'Failed to save extraction log: {save_error}')
-    
-    except Exception as e:
-        context.log.error(f'❌ Error in handle_blog_content for {url}: {e}')
-        context.log.warning(f'⚠️ Skipping blog content extraction due to error: {e}')
 
 
 def _get_pdf_headers(domain: str) -> dict:
@@ -1884,7 +1914,10 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                                     str(pdf_file_path), file_size, context
                                 )
                                 
-                                context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
+                                # Track PDF success
+                                global PDF_SUCCESS_COUNT
+                                PDF_SUCCESS_COUNT += 1
+                                context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes) [PDF #{PDF_SUCCESS_COUNT}]')
                                 return
                             else:
                                 context.log.warning(f'⚠️ Response is not a PDF (Content-Type: {content_type})')
@@ -1901,11 +1934,16 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                 else:
                     raise e
         
-        context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url}')
+        # Track PDF failure
+        global PDF_FAILURE_COUNT
+        PDF_FAILURE_COUNT += 1
+        context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url} [PDF FAIL #{PDF_FAILURE_COUNT}]')
         context.log.warning(f'💡 This might be due to IP blocking or rate limiting')
                     
     except Exception as e:
-        context.log.error(f'❌ Error processing PDF {url}: {e}')
+        # Track PDF failure
+        PDF_FAILURE_COUNT += 1
+        context.log.error(f'❌ Error processing PDF {url}: {e} [PDF FAIL #{PDF_FAILURE_COUNT}]')
         context.log.warning(f'💡 PDF download failed - this is common when IP gets blocked')
 
 
