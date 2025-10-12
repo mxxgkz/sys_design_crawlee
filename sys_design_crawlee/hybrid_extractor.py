@@ -179,39 +179,32 @@ class HybridContentExtractor:
         
         return extraction_results
     
+    def _create_ssl_bypass_session(self) -> requests.Session:
+        """Create a requests session with SSL verification disabled"""
+        session = requests.Session()
+        session.verify = False
+        return session
+    
+    def _get_standard_headers(self) -> Dict[str, str]:
+        """Get standard headers for HTTP requests"""
+        return {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+
     async def _extract_with_newspaper(self, url: str) -> Optional[Dict[str, Any]]:
-        """Extract content using Newspaper3k"""
+        """Extract content using Newspaper3k with SSL bypass"""
         try:
             print(f"🔍 Trying Newspaper3k extraction for: {url}")
             
-            # Disable SSL warnings globally
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            session = self._create_ssl_bypass_session()
+            headers = self._get_standard_headers()
             
-            # Try a different approach: use requests directly and pass HTML to newspaper3k
-            import requests
-            import ssl
-            
-            # Create unverified SSL context
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            # Create session with SSL bypass
-            session = requests.Session()
-            session.verify = False
-            
-            # Configure headers
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-            
-            # Download the page content directly with SSL bypass
+            # Try direct download approach first
             try:
                 response = session.get(url, headers=headers, timeout=30)
                 response.raise_for_status()
@@ -219,7 +212,7 @@ class HybridContentExtractor:
                 
                 print(f"📄 Downloaded HTML content: {len(html_content)} chars")
                 
-                # Create article and set the HTML content directly
+                # Create article and set HTML content directly
                 article = Article(url)
                 article.set_html(html_content)
                 article.parse()
@@ -228,14 +221,11 @@ class HybridContentExtractor:
                 print(f"⚠️ Direct download failed: {download_error}")
                 print(f"🔄 Falling back to standard newspaper3k method...")
                 
-                # Fallback to standard method with enhanced SSL bypass
+                # Fallback to standard method
                 article = Article(url)
-                
-                # Configure headers
                 article.config.headers = headers
                 article.config.verify_ssl = False
                 
-                # Try to set session if possible
                 if hasattr(article.config, 'session'):
                     article.config.session = session
                 
@@ -287,19 +277,11 @@ class HybridContentExtractor:
         try:
             print(f"🔍 Trying Readability extraction for: {url}")
             
-            # Configure headers to avoid 406 errors
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'DNT': '1',
-            }
+            session = self._create_ssl_bypass_session()
+            headers = self._get_standard_headers()
+            headers['DNT'] = '1'  # Add DNT header for readability
             
-            # Disable SSL verification for problematic sites
-            response = requests.get(url, headers=headers, timeout=30, verify=False)
+            response = session.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             
             doc = Document(response.text)

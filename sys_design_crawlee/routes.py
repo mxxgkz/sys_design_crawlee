@@ -24,47 +24,24 @@ ENABLE_TABLE_PARSING = False  # -1 means no limit
 # Flag to force re-extraction of blog content even if previously extracted successfully
 FORCE_REEXTRACT_BLOGS = True  # Set to True to re-extract all blogs regardless of previous status
 
-# Logging helper functions
-def log_info(context, message):
-    """Helper function for info logging"""
-    context.log.info(message)
-
-def log_warning(context, message):
-    """Helper function for warning logging"""
-    context.log.warning(message)
-
-def log_error(context, message):
-    """Helper function for error logging"""
-    context.log.error(message)
-
-def log_debug(context, message):
-    """Helper function for debug logging (only if DEBUG_MODE is True)"""
-    if DEBUG_MODE:
-        context.log.info(f"[DEBUG] {message}")
-
-def log_success(context, operation, details=""):
-    """Helper function for success logging with consistent format"""
-    message = f"✅ {operation}"
+# Simplified logging helper
+def log_with_emoji(context, emoji, message, details=""):
+    """Unified logging helper with emoji prefix"""
+    full_message = f"{emoji} {message}"
     if details:
-        message += f" - {details}"
-    context.log.info(message)
-
-def log_attempt(context, operation, attempt_num=None):
-    """Helper function for attempt logging"""
-    message = f"🔄 {operation}"
-    if attempt_num:
-        message += f" (attempt #{attempt_num})"
-    context.log.info(message)
+        full_message += f" - {details}"
+    context.log.info(full_message)
 
 async def try_button_click(page, button, click_methods, context):
     """Try multiple click methods on a button with logging"""
     for method_name, method_func in click_methods.items():
         try:
             await method_func()
-            log_success(context, f"Successfully clicked button using {method_name}")
+            log_with_emoji(context, "✅", f"Successfully clicked button using {method_name}")
             return True
         except Exception as e:
-            log_debug(context, f"Click method {method_name} failed: {e}")
+            if DEBUG_MODE:
+                log_with_emoji(context, "🔍", f"Click method {method_name} failed: {e}")
             continue
     return False
 
@@ -72,31 +49,24 @@ async def count_and_log_elements(page, selector, context, description):
     """Count elements and log the result"""
     elements = page.locator(selector)
     count = await elements.count()
-    log_info(context, f"{description}: {count}")
+    log_with_emoji(context, "📊", f"{description}: {count}")
     return elements, count
-
-def log_element_analysis(context, element_type, count, details=""):
-    """Log element analysis results"""
-    message = f"Found {count} {element_type}"
-    if details:
-        message += f" - {details}"
-    log_info(context, message)
 
 async def test_selectors(page, selectors, context, description="Testing selectors"):
     """Test multiple selectors and log results"""
-    log_debug(context, f"{description}:")
-    for selector in selectors:
-        try:
-            elements = page.locator(selector)
-            count = await elements.count()
-            log_debug(context, f'Selector "{selector}": {count} elements found')
-            if count > 0:
-                # Get the first element's HTML for debugging
-                first_element = elements.first
-                html = await first_element.inner_html()
-                log_debug(context, f'First element HTML: {html[:200]}...')
-        except Exception as e:
-            log_debug(context, f'Selector "{selector}" failed: {e}')
+    if DEBUG_MODE:
+        log_with_emoji(context, "🔍", f"{description}:")
+        for selector in selectors:
+            try:
+                elements = page.locator(selector)
+                count = await elements.count()
+                log_with_emoji(context, "🔍", f'Selector "{selector}": {count} elements found')
+                if count > 0:
+                    first_element = elements.first
+                    html = await first_element.inner_html()
+                    log_with_emoji(context, "🔍", f'First element HTML: {html[:200]}...')
+            except Exception as e:
+                log_with_emoji(context, "🔍", f'Selector "{selector}" failed: {e}')
 
 def create_blog_data_structures(blog_id, title, company, tags, year, url, final_result, 
                                downloaded_images, text_file_path, blog_dir, metadata_file, 
@@ -235,14 +205,15 @@ async def extract_blog_content(page, context: PlaywrightCrawlingContext) -> tupl
             if count > 0:
                 content_element = element
                 successful_selector = selector
-                log_success(context, f"Found content using selector: {selector}", f"{count} elements")
+                log_with_emoji(context, "✅", f"Found content using selector: {selector}", f"{count} elements")
                 break
             else:
                 extraction_issues['content_selectors_failed'].append(f'{selector}: no elements found')
         except Exception as e:
             error_msg = f'{selector}: {str(e)}'
             extraction_issues['content_selectors_failed'].append(error_msg)
-            log_debug(context, f'Selector "{selector}" failed: {e}')
+            if DEBUG_MODE:
+                log_with_emoji(context, "🔍", f'Selector "{selector}" failed: {e}')
             continue
     
     if not content_element:
@@ -784,7 +755,8 @@ async def load_more_handler(context: PlaywrightCrawlingContext) -> None:
                 context.log.info(f'Found "Load more" button using selector: {selector}')
                 break
         except Exception as e:
-            log_debug(context, f'Selector "{selector}" failed: {e}')
+            if DEBUG_MODE:
+                log_with_emoji(context, "🔍", f'Selector "{selector}" failed: {e}')
             continue
     
     if not load_more_button:
@@ -820,7 +792,7 @@ async def load_more_handler(context: PlaywrightCrawlingContext) -> None:
                 break
             
             # Try to click the button
-            log_attempt(context, 'Attempting to click "Load more" button', click_count + 1)
+            log_with_emoji(context, "🔄", f'Attempting to click "Load more" button (attempt #{click_count + 1})')
             
             # Define click methods to try
             click_methods = {
@@ -833,7 +805,7 @@ async def load_more_handler(context: PlaywrightCrawlingContext) -> None:
             
             # If all methods failed, assume success to continue (content might have loaded anyway)
             if not click_success:
-                log_warning(context, 'All click methods failed, trying to continue')
+                log_with_emoji(context, "⚠️", 'All click methods failed, trying to continue')
                 click_success = True
             
             if not click_success:
@@ -1341,7 +1313,7 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     if DEBUG_MODE:
         # Debug: Check if the page loaded correctly
         title = await page.title()
-        log_debug(context, f'Page title: {title}')
+        log_with_emoji(context, "🔍", f'Page title: {title}')
         
         # Debug: Check for various elements
         debug_selectors = [
@@ -1386,7 +1358,7 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
         try:
             await page.wait_for_selector('div[data-row-index]', timeout=10000)
             data_count = await data_elements.count()
-            log_info(context, f'Found {data_count} table cells after waiting')
+            log_with_emoji(context, "📊", f'Found {data_count} table cells after waiting')
         except Exception:
             context.log.warning('No table cells found, page may not have loaded properly')
             return
@@ -1797,18 +1769,44 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
         context.log.warning(f'⚠️ Skipping blog content extraction due to error: {e}')
 
 
+def _get_pdf_headers(domain: str) -> dict:
+    """Get appropriate headers for PDF download based on domain"""
+    base_headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    
+    if 'arxiv.org' in domain:
+        return {
+            **base_headers,
+            'Accept': 'application/pdf,application/octet-stream,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Referer': 'https://arxiv.org/',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+        }
+    else:
+        return {
+            **base_headers,
+            'Accept': 'application/pdf,application/octet-stream,*/*',
+            'DNT': '1',
+        }
+
 async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) -> None:
     """Handle PDF URL directly without going through Playwright navigation."""
     context.log.info(f'📄 Processing PDF directly: {url}')
     
     try:
-        # Extract basic metadata from URL
         from urllib.parse import urlparse
         domain = urlparse(url).netloc
         
-        # Special handling for arXiv URLs
+        # Generate metadata
         if 'arxiv.org' in domain:
-            # Extract arXiv ID from URL for better title
             arxiv_id = url.split('/')[-1].replace('.pdf', '')
             title = f"arXiv Paper {arxiv_id}"
             company = "arXiv"
@@ -1816,7 +1814,6 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
             company = domain.replace('www.', '').split('.')[0].title()
             title = f"PDF Document from {company}"
         
-        # Generate unique PDF ID
         pdf_id = hybrid_extractor.generate_blog_id(url, title)
         
         # Create storage directories
@@ -1824,40 +1821,12 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
         pdfs_dir = storage_dir / 'pdfs'
         pdfs_dir.mkdir(parents=True, exist_ok=True)
         
-        # Download PDF with retry logic and better headers
+        # Download PDF with retry logic
         import aiohttp
         import random
-        import time
         
-        # Random delay to avoid rate limiting
-        await asyncio.sleep(random.uniform(1, 3))
-        
-        # Different headers for different domains
-        if 'arxiv.org' in domain:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,application/octet-stream,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Referer': 'https://arxiv.org/',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Upgrade-Insecure-Requests': '1',
-            }
-        else:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,application/octet-stream,*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
+        await asyncio.sleep(random.uniform(1, 3))  # Random delay
+        headers = _get_pdf_headers(domain)
         
         max_retries = 3
         for attempt in range(max_retries):
@@ -1866,17 +1835,16 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                 async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
                     context.log.info(f'📥 Attempting to download PDF (attempt {attempt + 1}/{max_retries}): {url}')
                     
-                    # For arXiv, first visit the abstract page to establish session
+                    # For arXiv, visit abstract page first
                     if 'arxiv.org' in domain and attempt == 0:
                         try:
-                            # Convert PDF URL to abstract URL
                             abstract_url = url.replace('/pdf/', '/abs/').replace('.pdf', '')
                             context.log.info(f'📄 Visiting abstract page first: {abstract_url}')
                             
                             async with session.get(abstract_url) as abstract_response:
                                 if abstract_response.status == 200:
                                     context.log.info(f'✅ Abstract page visited successfully')
-                                    await asyncio.sleep(1)  # Brief pause
+                                    await asyncio.sleep(1)
                                 else:
                                     context.log.warning(f'⚠️ Abstract page returned {abstract_response.status}')
                         except Exception as e:
@@ -1886,11 +1854,9 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                         context.log.info(f'📊 Response status: {response.status} for {url}')
                         
                         if response.status == 200:
-                            # Check content type
                             content_type = response.headers.get('content-type', '')
                             context.log.info(f'📊 Content-Type: {content_type}')
                             
-                            # Check if it's actually a PDF
                             if 'application/pdf' in content_type or url.endswith('.pdf') or 'arxiv.org/pdf' in url:
                                 # Save PDF file
                                 pdf_filename = f"{pdf_id}_{sanitize_filename(title[:50])}.pdf"
@@ -1900,12 +1866,11 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                                     async for chunk in response.content.iter_chunked(8192):
                                         f.write(chunk)
                                 
-                                # Get file size
                                 file_size = pdf_file_path.stat().st_size
                                 context.log.info(f'📊 Downloaded {file_size:,} bytes to {pdf_file_path}')
                                 
-                                # Verify it's a valid PDF by checking file size and magic bytes
-                                if file_size > 1000:  # PDFs should be at least 1KB
+                                # Verify PDF validity
+                                if file_size > 1000:
                                     with open(pdf_file_path, 'rb') as f:
                                         magic_bytes = f.read(4)
                                         if magic_bytes == b'%PDF':
@@ -1920,23 +1885,22 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
                                 )
                                 
                                 context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
-                                return  # Success, exit the function
+                                return
                             else:
                                 context.log.warning(f'⚠️ Response is not a PDF (Content-Type: {content_type})')
                         else:
                             context.log.warning(f'⚠️ HTTP {response.status} for PDF: {url}')
                             
                             if attempt < max_retries - 1:
-                                await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                                await asyncio.sleep(random.uniform(2, 5))
                             
             except Exception as e:
                 context.log.warning(f'⚠️ Download attempt {attempt + 1} failed: {e}')
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
+                    await asyncio.sleep(random.uniform(2, 5))
                 else:
                     raise e
         
-        # If we get here, all retries failed
         context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url}')
         context.log.warning(f'💡 This might be due to IP blocking or rate limiting')
                     
@@ -1945,167 +1909,6 @@ async def handle_pdf_url_directly(url: str, context: PlaywrightCrawlingContext) 
         context.log.warning(f'💡 PDF download failed - this is common when IP gets blocked')
 
 
-async def handle_pdf_content(context: PlaywrightCrawlingContext) -> None:
-    """Handle PDF content - download and save metadata with better error handling."""
-    # Don't use the page object for PDFs to avoid navigation issues
-    url = context.request.url
-    
-    try:
-        # Extract basic metadata from URL
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc
-        
-        # Special handling for arXiv URLs
-        if 'arxiv.org' in domain:
-            # Extract arXiv ID from URL for better title
-            arxiv_id = url.split('/')[-1].replace('.pdf', '')
-            title = f"arXiv Paper {arxiv_id}"
-            company = "arXiv"
-        else:
-            company = domain.replace('www.', '').split('.')[0].title()
-            title = f"PDF Document from {company}"
-        
-        # Generate unique PDF ID
-        pdf_id = hybrid_extractor.generate_blog_id(url, title)
-        
-        # Create storage directories
-        storage_dir = Path('storage')
-        pdfs_dir = storage_dir / 'pdfs'
-        pdfs_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Download PDF with retry logic and better headers
-        import aiohttp
-        import random
-        import time
-        
-        # Random delay to avoid rate limiting
-        await asyncio.sleep(random.uniform(1, 3))
-        
-        # Different headers for different domains
-        if 'arxiv.org' in domain:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,application/octet-stream,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Referer': 'https://arxiv.org/',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Upgrade-Insecure-Requests': '1',
-            }
-        else:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,application/octet-stream,*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                timeout = aiohttp.ClientTimeout(total=30, connect=10)
-                async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                    context.log.info(f'📥 Attempting to download PDF (attempt {attempt + 1}/{max_retries}): {url}')
-                    
-                    # For arXiv, first visit the abstract page to establish session
-                    if 'arxiv.org' in domain and attempt == 0:
-                        try:
-                            # Convert PDF URL to abstract URL
-                            abstract_url = url.replace('/pdf/', '/abs/').replace('.pdf', '')
-                            context.log.info(f'📄 Visiting abstract page first: {abstract_url}')
-                            
-                            async with session.get(abstract_url) as abstract_response:
-                                if abstract_response.status == 200:
-                                    context.log.info(f'✅ Abstract page visited successfully')
-                                    await asyncio.sleep(1)  # Brief pause
-                                else:
-                                    context.log.warning(f'⚠️ Abstract page returned {abstract_response.status}')
-                        except Exception as e:
-                            context.log.warning(f'⚠️ Could not visit abstract page: {e}')
-                    
-                    async with session.get(url) as response:
-                        context.log.info(f'📊 Response status: {response.status} for {url}')
-                        context.log.info(f'📊 Response headers: {dict(response.headers)}')
-                        
-                        if response.status == 200:
-                            # Check content type
-                            content_type = response.headers.get('content-type', '')
-                            context.log.info(f'📊 Content-Type: {content_type}')
-                            
-                            # Check if it's actually a PDF
-                            if 'application/pdf' in content_type or url.endswith('.pdf') or 'arxiv.org/pdf' in url:
-                                # Save PDF file
-                                pdf_filename = f"{pdf_id}_{sanitize_filename(title[:50])}.pdf"
-                                pdf_file_path = pdfs_dir / pdf_filename
-                                
-                                with open(pdf_file_path, 'wb') as f:
-                                    async for chunk in response.content.iter_chunked(8192):
-                                        f.write(chunk)
-                                
-                                # Get file size
-                                file_size = pdf_file_path.stat().st_size
-                                context.log.info(f'📊 Downloaded {file_size:,} bytes to {pdf_file_path}')
-                                
-                                # Verify it's a valid PDF by checking file size and magic bytes
-                                if file_size > 1000:  # PDFs should be at least 1KB
-                                    with open(pdf_file_path, 'rb') as f:
-                                        magic_bytes = f.read(4)
-                                        if magic_bytes == b'%PDF':
-                                            context.log.info(f'✅ Valid PDF detected (magic bytes: {magic_bytes})')
-                                        else:
-                                            context.log.warning(f'⚠️ File may not be a valid PDF (magic bytes: {magic_bytes})')
-                                
-                                # Save metadata to database
-                                await save_pdf_metadata_to_database(
-                                    pdf_id, title, company, '', '', url,
-                                    str(pdf_file_path), file_size, context
-                                )
-                                
-                                context.log.info(f'✅ Saved PDF: {title} ({file_size:,} bytes)')
-                                return  # Success, exit the function
-                            else:
-                                context.log.warning(f'⚠️ Response is not a PDF (Content-Type: {content_type})')
-                                # Log first few bytes to see what we got
-                                try:
-                                    content_preview = await response.text()
-                                    context.log.warning(f'⚠️ Response preview: {content_preview[:200]}...')
-                                except:
-                                    context.log.warning(f'⚠️ Could not read response content')
-                        else:
-                            context.log.warning(f'⚠️ HTTP {response.status} for PDF: {url}')
-                            # Log response content for debugging
-                            try:
-                                response_text = await response.text()
-                                context.log.warning(f'⚠️ Response content: {response_text[:500]}...')
-                            except:
-                                context.log.warning(f'⚠️ Could not read response content')
-                            
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
-                            
-            except Exception as e:
-                context.log.warning(f'⚠️ Download attempt {attempt + 1} failed: {e}')
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(2, 5))  # Wait before retry
-                else:
-                    raise e
-        
-        # If we get here, all retries failed
-        context.log.error(f'❌ Failed to download PDF after {max_retries} attempts: {url}')
-        context.log.warning(f'💡 This might be due to IP blocking or rate limiting')
-        context.log.warning(f'💡 Try running the crawler later or from a different network')
-                    
-    except Exception as e:
-        context.log.error(f'❌ Error processing PDF {url}: {e}')
-        context.log.warning(f'💡 PDF download failed - this is common when IP gets blocked')
 
 
 @router.default_handler
@@ -2121,10 +1924,7 @@ async def default_handler(context: PlaywrightCrawlingContext) -> None:
     
     try:
         # Route based on label
-        if request_label == 'PDF':
-            # Handle PDF content extraction
-            await handle_pdf_content(context)
-        elif request_label == 'BLOG':
+        if request_label == 'BLOG':
             # Handle blog content extraction
             await handle_blog_content(context)
         else:
