@@ -74,15 +74,29 @@ class HybridContentExtractor:
             
             newspaper_result = await self._extract_with_newspaper(url)
             if newspaper_result and newspaper_result.get('text'):
-                extraction_results['methods_tried'].append('newspaper3k')
-                extraction_results['methods_successful'].append('newspaper3k')
-                extraction_results['final_result'] = newspaper_result
-                extraction_results['extraction_quality'] = 'high'
+                content_length = len(newspaper_result.get('text', ''))
+                # Always enhance with comprehensive image extraction, regardless of content length
+                enhanced_result = await self._enhance_with_comprehensive_images(newspaper_result, url, page)
                 
-                if context:
-                    context.log.info(f"✅ Newspaper3k successful: {len(newspaper_result.get('text', ''))} chars, {len(newspaper_result.get('images', []))} images")
-                
-                return extraction_results
+                # Check if content is sufficient (minimum 500 characters for a meaningful blog post)
+                if content_length >= 500:
+                    extraction_results['methods_tried'].append('newspaper3k')
+                    extraction_results['methods_successful'].append('newspaper3k')
+                    extraction_results['final_result'] = enhanced_result
+                    extraction_results['extraction_quality'] = 'high'
+                    
+                    if context:
+                        context.log.info(f"✅ Newspaper3k successful: {content_length} chars, {len(enhanced_result.get('images', []))} images")
+                    
+                    return extraction_results
+                else:
+                    # Content too short, but we still have comprehensive images
+                    extraction_results['methods_tried'].append('newspaper3k')
+                    extraction_results['methods_failed'].append('newspaper3k')
+                    extraction_results['errors'].append(f'Newspaper3k: Insufficient content ({content_length} chars)')
+                    
+                    if context:
+                        context.log.warning(f"⚠️ Newspaper3k: Insufficient content ({content_length} chars) - trying other methods")
             else:
                 extraction_results['methods_tried'].append('newspaper3k')
                 extraction_results['methods_failed'].append('newspaper3k')
@@ -107,16 +121,29 @@ class HybridContentExtractor:
                 context.log.info(f"Trying Readability extraction for {url}")
             
             readability_result = await self._extract_with_readability(url)
-            if readability_result and readability_result.get('text') and len(readability_result.get('text', '')) > 50:
-                extraction_results['methods_tried'].append('readability')
-                extraction_results['methods_successful'].append('readability')
-                extraction_results['final_result'] = readability_result
-                extraction_results['extraction_quality'] = 'medium'
+            if readability_result and readability_result.get('text'):
+                content_length = len(readability_result.get('text', ''))
+                # Always enhance with comprehensive image extraction, regardless of content length
+                enhanced_result = await self._enhance_with_comprehensive_images(readability_result, url, page)
                 
-                if context:
-                    context.log.info(f"✅ Readability successful: {len(readability_result.get('text', ''))} chars")
-                
-                return extraction_results
+                if content_length >= 500:
+                    extraction_results['methods_tried'].append('readability')
+                    extraction_results['methods_successful'].append('readability')
+                    extraction_results['final_result'] = enhanced_result
+                    extraction_results['extraction_quality'] = 'medium'
+                    
+                    if context:
+                        context.log.info(f"✅ Readability successful: {content_length} chars, {len(enhanced_result.get('images', []))} images")
+                    
+                    return extraction_results
+                else:
+                    # Content too short, try other methods
+                    extraction_results['methods_tried'].append('readability')
+                    extraction_results['methods_failed'].append('readability')
+                    extraction_results['errors'].append(f'Readability: Insufficient content ({content_length} chars)')
+                    
+                    if context:
+                        context.log.warning(f"⚠️ Readability: Insufficient content ({content_length} chars) - trying other methods")
             else:
                 extraction_results['methods_tried'].append('readability')
                 extraction_results['methods_failed'].append('readability')
@@ -143,15 +170,28 @@ class HybridContentExtractor:
                 
                 custom_result = await self._extract_with_playwright(page, url, context)
                 if custom_result and custom_result.get('text'):
-                    extraction_results['methods_tried'].append('playwright')
-                    extraction_results['methods_successful'].append('playwright')
-                    extraction_results['final_result'] = custom_result
-                    extraction_results['extraction_quality'] = 'low'
+                    content_length = len(custom_result.get('text', ''))
+                    # Always enhance with comprehensive image extraction, regardless of content length
+                    enhanced_result = await self._enhance_with_comprehensive_images(custom_result, url, page)
                     
-                    if context:
-                        context.log.info(f"✅ Custom Playwright successful: {len(custom_result.get('text', ''))} chars")
-                    
-                    return extraction_results
+                    if content_length >= 500:
+                        extraction_results['methods_tried'].append('playwright')
+                        extraction_results['methods_successful'].append('playwright')
+                        extraction_results['final_result'] = enhanced_result
+                        extraction_results['extraction_quality'] = 'low'
+                        
+                        if context:
+                            context.log.info(f"✅ Custom Playwright successful: {content_length} chars, {len(enhanced_result.get('images', []))} images")
+                        
+                        return extraction_results
+                    else:
+                        # Content too short, try other methods
+                        extraction_results['methods_tried'].append('playwright')
+                        extraction_results['methods_failed'].append('playwright')
+                        extraction_results['errors'].append(f'Playwright: Insufficient content ({content_length} chars)')
+                        
+                        if context:
+                            context.log.warning(f"⚠️ Playwright: Insufficient content ({content_length} chars) - trying other methods")
                 else:
                     extraction_results['methods_tried'].append('playwright')
                     extraction_results['methods_failed'].append('playwright')
@@ -179,6 +219,60 @@ class HybridContentExtractor:
         
         return extraction_results
     
+    async def _enhance_with_comprehensive_images(self, result: Dict[str, Any], url: str, page=None) -> Dict[str, Any]:
+        """
+        Enhance any extraction result with comprehensive image extraction.
+        This ensures ALL images are captured regardless of which method succeeded.
+        
+        Args:
+            result: The extraction result from any method
+            url: The URL being processed
+            page: Optional Playwright page for getting rendered content
+            
+        Returns:
+            Enhanced result with comprehensive image list
+        """
+        try:
+            # If we have a Playwright page, use it to get the fully rendered content
+            if page:
+                html_content = await page.content()
+            else:
+                # Fallback to aiohttp if no page available
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, headers=self._get_standard_headers(), ssl=False) as response:
+                        if response.status == 200:
+                            html_content = await response.text()
+                        else:
+                            return result
+            
+            # Extract ALL images from the HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            all_images = []
+            all_img_tags = soup.find_all('img')
+            
+            for img in all_img_tags:
+                src = img.get('src')
+                alt = img.get('alt', '')
+                if src:
+                    all_images.append({
+                        'src': src,
+                        'alt': alt,
+                        'width': img.get('width', ''),
+                        'height': img.get('height', '')
+                    })
+            
+            # Update the result with comprehensive images
+            enhanced_result = result.copy()
+            enhanced_result['images'] = all_images
+            enhanced_result['image_count'] = len(all_images)
+            enhanced_result['comprehensive_images'] = True
+            
+            return enhanced_result
+        except Exception as e:
+            # If enhancement fails, return original result
+            return result
+    
     def _create_ssl_bypass_session(self) -> requests.Session:
         """Create a requests session with SSL verification disabled"""
         session = requests.Session()
@@ -196,7 +290,7 @@ class HybridContentExtractor:
             'Upgrade-Insecure-Requests': '1',
         }
     
-    def _extract_content_manually(self, html_content: str) -> Optional[str]:
+    def _extract_content_manually(self, html_content: str) -> Optional[Dict[str, Any]]:
         """
         Manually extract content from HTML using BeautifulSoup when automated methods fail.
         
@@ -204,10 +298,24 @@ class HybridContentExtractor:
             html_content: Raw HTML content as string
             
         Returns:
-            Extracted text content or None if extraction fails
+            Dictionary with text content and images, or None if extraction fails
         """
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # First, extract ALL images from the document (comprehensive search)
+            all_images = []
+            all_img_tags = soup.find_all('img')
+            for img in all_img_tags:
+                src = img.get('src')
+                alt = img.get('alt', '')
+                if src:
+                    all_images.append({
+                        'src': src,
+                        'alt': alt,
+                        'width': img.get('width', ''),
+                        'height': img.get('height', '')
+                    })
             
             # Try different content selectors in order of preference
             content_selectors = [
@@ -221,13 +329,33 @@ class HybridContentExtractor:
                 '.post-text', '.entry-text', '.content-text'
             ]
             
-            for selector in content_selectors:
+            # Add generic selectors for obfuscated class names (like Ramp's random classes)
+            generic_selectors = [
+                'div[class*="content"]',  # Any div with "content" in class name
+                'div[class*="post"]',     # Any div with "post" in class name
+                'div[class*="article"]',  # Any div with "article" in class name
+                'div[class*="text"]',     # Any div with "text" in class name
+                'div[class*="body"]',     # Any div with "body" in class name
+                'div[class*="main"]',     # Any div with "main" in class name
+                'section[class*="content"]',  # Any section with "content" in class name
+                'section[class*="post"]',     # Any section with "post" in class name
+            ]
+            
+            # Combine all selectors
+            all_selectors = content_selectors + generic_selectors
+            
+            for selector in all_selectors:
                 elements = soup.select(selector)
                 if elements:
                     text_content = ' '.join([elem.get_text(strip=True) for elem in elements])
                     if len(text_content) > 100:
                         print(f"🔍 Found content with selector '{selector}': {len(text_content)} chars")
-                        return text_content
+                        return {
+                            'text': text_content,
+                            'images': all_images,
+                            'content_length': len(text_content),
+                            'image_count': len(all_images)
+                        }
             
             # If no specific selectors work, try to extract from common text containers
             text_containers = soup.find_all(['div', 'section'], class_=re.compile(r'(content|post|article|blog|entry)', re.I))
@@ -235,7 +363,12 @@ class HybridContentExtractor:
                 text_content = ' '.join([elem.get_text(strip=True) for elem in text_containers])
                 if len(text_content) > 100:
                     print(f"🔍 Found content with text containers: {len(text_content)} chars")
-                    return text_content
+                    return {
+                        'text': text_content,
+                        'images': all_images,
+                        'content_length': len(text_content),
+                        'image_count': len(all_images)
+                    }
             
             # Last resort: try to find the largest text block
             all_text_elements = soup.find_all(['p', 'div', 'span'], string=True)
@@ -247,13 +380,65 @@ class HybridContentExtractor:
                     text_content = ' '.join(meaningful_texts)
                     if len(text_content) > 500:  # Only if we get substantial content
                         print(f"🔍 Found content with text elements: {len(text_content)} chars")
-                        return text_content
+                        return {
+                            'text': text_content,
+                            'images': all_images,
+                            'content_length': len(text_content),
+                            'image_count': len(all_images)
+                        }
+            
+            # Ultra-aggressive fallback: extract all text from the body and filter
+            print("🔍 Trying ultra-aggressive text extraction...")
+            body = soup.find('body')
+            if body:
+                # Remove script, style, nav, header, footer elements
+                for element in body(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+                    element.decompose()
+                
+                # Get all text content
+                all_text = body.get_text(separator='\n', strip=True)
+                
+                # Split into paragraphs and filter
+                paragraphs = [p.strip() for p in all_text.split('\n') if p.strip()]
+                meaningful_paragraphs = [p for p in paragraphs if len(p) > 50]  # Only substantial paragraphs
+                
+                if meaningful_paragraphs:
+                    text_content = '\n\n'.join(meaningful_paragraphs)
+                    if len(text_content) > 500:
+                        print(f"🔍 Found content with ultra-aggressive extraction: {len(text_content)} chars")
+                        return {
+                            'text': text_content,
+                            'images': all_images,
+                            'content_length': len(text_content),
+                            'image_count': len(all_images)
+                        }
             
             return None
             
         except Exception as e:
             print(f"⚠️ Manual extraction failed: {e}")
             return None
+    
+    def _extract_images_from_elements(self, elements) -> List[Dict[str, Any]]:
+        """Extract images from BeautifulSoup elements"""
+        images = []
+        try:
+            for element in elements:
+                # Find all img tags within the element
+                img_tags = element.find_all('img')
+                for img in img_tags:
+                    src = img.get('src')
+                    alt = img.get('alt', '')
+                    if src:
+                        images.append({
+                            'src': src,
+                            'alt': alt,
+                            'width': img.get('width', ''),
+                            'height': img.get('height', '')
+                        })
+        except Exception as e:
+            print(f"⚠️ Image extraction from elements failed: {e}")
+        return images
 
     async def _extract_with_newspaper(self, url: str) -> Optional[Dict[str, Any]]:
         """Extract content using Newspaper3k with SSL bypass"""
@@ -301,10 +486,15 @@ class HybridContentExtractor:
                 print(f"🔍 Debug: Article images count: {len(article.images) if article.images else 0}")
                 
                 # Try to extract content manually from HTML
-                manual_content = self._extract_content_manually(html_content)
-                if manual_content:
-                    article.text = manual_content
-                    print(f"✅ Manual extraction successful: {len(article.text)} chars")
+                manual_result = self._extract_content_manually(html_content)
+                if manual_result and manual_result.get('text'):
+                    article.text = manual_result['text']
+                    # Add manual images to the article images
+                    if manual_result.get('images'):
+                        for img_info in manual_result['images']:
+                            if img_info.get('src'):
+                                article.images.add(img_info['src'])
+                    print(f"✅ Manual extraction successful: {len(article.text)} chars, {len(manual_result.get('images', []))} images")
                 else:
                     print(f"⚠️ Manual extraction also failed")
                     return None
@@ -439,21 +629,60 @@ class HybridContentExtractor:
                 body = await page.locator('body')
                 content_text = await body.text_content() or ""
             
-            # Extract images
+            # Extract images with enhanced selectors for obfuscated class names
             images = []
             try:
-                img_elements = await page.locator('img').all()
-                for i, img in enumerate(img_elements[:10]):  # Limit to 10 images
+                # Try multiple image selectors to handle obfuscated class names
+                image_selectors = [
+                    'img',  # Standard img tag
+                    'img[class*="image"]',  # Any img with "image" in class name
+                    'img[class*="img"]',    # Any img with "img" in class name
+                    'img[class*="photo"]',  # Any img with "photo" in class name
+                    'img[class*="picture"]', # Any img with "picture" in class name
+                    'img[class*="media"]',  # Any img with "media" in class name
+                    'img[class*="asset"]',  # Any img with "asset" in class name
+                    'img[class*="banner"]', # Any img with "banner" in class name
+                    'img[class*="hero"]',   # Any img with "hero" in class name
+                    'img[class*="cover"]',  # Any img with "cover" in class name
+                ]
+                
+                all_images = set()  # Use set to avoid duplicates
+                
+                for selector in image_selectors:
                     try:
-                        src = await img.get_attribute('src')
-                        alt = await img.get_attribute('alt') or ""
-                        if src:
-                            img_info = await self._process_image(src, url, i, alt)
-                            if img_info:
-                                images.append(img_info)
+                        img_elements = await page.locator(selector).all()
+                        for img in img_elements:
+                            try:
+                                src = await img.get_attribute('src')
+                                if src and src not in all_images:
+                                    all_images.add(src)
+                            except Exception:
+                                continue
                     except Exception:
                         continue
-            except Exception:
+                
+                # Process all unique images
+                for i, img_src in enumerate(list(all_images)[:10]):  # Limit to 10 images
+                    try:
+                        # Get alt text from the first matching element
+                        alt = ""
+                        for selector in image_selectors:
+                            try:
+                                img_element = page.locator(f'{selector}[src="{img_src}"]').first
+                                if await img_element.count() > 0:
+                                    alt = await img_element.get_attribute('alt') or ""
+                                    break
+                            except Exception:
+                                continue
+                        
+                        img_info = await self._process_image(img_src, url, i, alt)
+                        if img_info:
+                            images.append(img_info)
+                    except Exception:
+                        continue
+                        
+            except Exception as e:
+                print(f"⚠️ Image extraction failed: {e}")
                 pass
             
             return {
