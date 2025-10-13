@@ -11,6 +11,7 @@ from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawlingContext
 from crawlee.router import Router
 from .hybrid_extractor import hybrid_extractor
+from .logging_utils import log_with_emoji, log_debug, log_attempt, log_warning
 
 # Debug flag - set to True to enable verbose debugging
 DEBUG_MODE = False
@@ -19,7 +20,7 @@ DEBUG_MODE = False
 MAX_BLOGS_TO_PROCESS = -1
 
 # Flag to control table parsing - set to False to skip table parsing and focus on enqueuing
-ENABLE_TABLE_PARSING = False  # -1 means no limit
+ENABLE_TABLE_PARSING = True  # -1 means no limit
 
 # Flag to force re-extraction of blog content even if previously extracted successfully
 FORCE_REEXTRACT_BLOGS = True  # Set to True to re-extract all blogs regardless of previous status
@@ -30,13 +31,79 @@ PDF_FAILURE_COUNT = 0
 BLOG_SUCCESS_COUNT = 0
 BLOG_FAILURE_COUNT = 0
 
-# Simplified logging helper
-def log_with_emoji(context, emoji, message, details=""):
-    """Unified logging helper with emoji prefix"""
-    full_message = f"{emoji} {message}"
-    if details:
-        full_message += f" - {details}"
-    context.log.info(full_message)
+# Constants for load_more_handler
+PAGE_LOAD_WAIT_TIME = 2000
+MAX_BUTTON_CLICKS = 10
+BUTTON_SCROLL_WAIT_TIME = 500
+BUTTON_CLICK_TIMEOUT = 5000
+CONTENT_LOAD_WAIT_TIME = 3000
+
+# Logging helpers are now imported from logging_utils
+
+
+def get_problematic_urls_from_database():
+    """
+    Query the database for URLs that have failed extractions or low extraction quality.
+    Returns a set of URLs that should be considered problematic.
+    """
+    problematic_urls = set()
+    
+    try:
+        # Connect to database
+        db_path = 'storage/table_data.db'
+        if not os.path.exists(db_path):
+            return problematic_urls
+            
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Query for URLs with failed extractions or low quality
+        # This includes:
+        # 1. URLs that exist in blog_content but have extraction_quality != 'high'
+        # 2. URLs that have very low content_length (likely failed extractions)
+        # 3. URLs that have no images when they should have images
+        
+        cursor.execute("""
+            SELECT DISTINCT url 
+            FROM blog_content 
+            WHERE 
+                extraction_quality != 'high' 
+                OR content_length < 100 
+                OR (has_images = 0 AND extraction_method != 'playwright')
+                OR extraction_method = 'failed'
+        """)
+        
+        failed_urls = cursor.fetchall()
+        for (url,) in failed_urls:
+            if url:
+                problematic_urls.add(url)
+        
+        # Also check for URLs that might have failed in PDF processing
+        cursor.execute("""
+            SELECT DISTINCT url 
+            FROM pdf_files 
+            WHERE file_size < 1000 OR file_size IS NULL
+        """)
+        
+        failed_pdf_urls = cursor.fetchall()
+        for (url,) in failed_pdf_urls:
+            if url:
+                problematic_urls.add(url)
+        
+        conn.close()
+        
+        print(f"🔍 Found {len(problematic_urls)} problematic URLs from database")
+        if problematic_urls:
+            print("📋 Sample problematic URLs:")
+            for i, url in enumerate(list(problematic_urls)[:5]):
+                print(f"   {i+1}. {url}")
+            if len(problematic_urls) > 5:
+                print(f"   ... and {len(problematic_urls) - 5} more")
+        
+    except Exception as e:
+        print(f"❌ Error querying problematic URLs from database: {e}")
+    
+    return problematic_urls
 
 
 async def try_button_click(page, button, click_methods, context):
@@ -44,36 +111,161 @@ async def try_button_click(page, button, click_methods, context):
     for method_name, method_func in click_methods.items():
         try:
             await method_func()
-            log_with_emoji(context, "✅", f"Successfully clicked button using {method_name}")
+            log_with_emoji("✅", f"Successfully clicked button using {method_name}", "", context)
             return True
         except Exception as e:
             if DEBUG_MODE:
-                log_with_emoji(context, "🔍", f"Click method {method_name} failed: {e}")
+                log_with_emoji("🔍", f"Click method {method_name} failed: {e}", "", context)
             continue
     return False
+
+
+async def load_more_handler(context: PlaywrightCrawlingContext) -> None:
+    """Handler to click the 'Load more' button."""
+    page = context.page
+
+    # Wait for page to load first
+    await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME)
+
+    # Try multiple selectors for the "Load more" button
+    selectors = [
+        'div[role="button"]:has-text("Load more")',
+        'div[role="button"] >> text=Load more',
+        'div:has-text("Load more")',
+        'button:has-text("Load more")',
+        '[role="button"]:has-text("Load more")'
+    ]
+
+    load_more_button = None
+    for selector in selectors:
+        try:
+            button = page.locator(selector)
+            if await button.count() > 0:
+                load_more_button = button.first
+                context.log.info(f'Found "Load more" button using selector: {selector}')
+                break
+        except Exception as e:
+            log_debug(context, f'Selector "{selector}" failed: {e}')
+
+            continue
+
+    if not load_more_button:
+        context.log.warning('No "Load more" button found with any selector')
+        return
+
+    click_count = 0
+    max_clicks = MAX_BUTTON_CLICKS
+    previous_cell_count = 0
+
+    # Get initial cell count
+    initial_cells = page.locator('div[data-row-index]')
+    initial_cell_count = await initial_cells.count()
+    context.log.info(f'Initial table cells: {initial_cell_count}')
+    
+    # Also check for blog links specifically
+    initial_blog_links = page.locator('div[data-col-index="4"] a')
+    initial_blog_count = await initial_blog_links.count()
+    context.log.info(f'Initial blog links: {initial_blog_count}')
+
+    while click_count < max_clicks:
+        try:
+            # Re-find the button each time in case it changed
+            current_button = page.locator('div[role="button"]:has-text("Load more")').first
+
+            # Check if button exists
+            if await current_button.count() == 0:
+                context.log.info(f'No "Load more" button found after {click_count} clicks')
+                break
+
+            # Scroll to the button to make sure it's in view
+            await current_button.scroll_into_view_if_needed()
+            await page.wait_for_timeout(BUTTON_SCROLL_WAIT_TIME)
+
+            # Check if button is visible
+            if not await current_button.is_visible():
+                context.log.info(f'Button no longer visible after {click_count} clicks')
+                break
+
+            # Try to click the button
+            log_attempt(context, 'Attempting to click "Load more" button', click_count + 1)
+
+            # Define click methods to try
+            click_methods = {
+                'regular click': lambda: current_button.click(timeout=BUTTON_CLICK_TIMEOUT),
+                'force click': lambda: current_button.click(force=True, timeout=BUTTON_CLICK_TIMEOUT),
+                'JavaScript click': lambda: page.evaluate('document.querySelector(\'div[role="button"]:has-text("Load more")\')?.click()')
+            }
+
+            click_success = await try_button_click(page, current_button, click_methods, context)
+
+            # If all methods failed, assume success to continue (content might have loaded anyway)
+            if not click_success:
+                log_warning(context, 'All click methods failed, trying to continue')
+                click_success = True
+
+            if not click_success:
+                break
+
+            click_count += 1
+
+            # Wait for content to load
+            await page.wait_for_timeout(CONTENT_LOAD_WAIT_TIME)
+
+            # Check if new content loaded by counting table cells
+            current_cells = page.locator('div[data-row-index]')
+            cell_count = await current_cells.count()
+            new_cells = cell_count - previous_cell_count
+            context.log.info(f'Click #{click_count}: {cell_count} total cells (+{new_cells} new)')
+            
+            # Also check blog links
+            current_blog_links = page.locator('div[data-col-index="4"] a')
+            blog_count = await current_blog_links.count()
+            context.log.info(f'Click #{click_count}: {blog_count} blog links')
+
+
+            # If no new cells were added, we might have reached the end
+            if new_cells == 0 and click_count > 1:
+                context.log.info(f'No new cells added after click #{click_count}, stopping')
+                break
+
+            previous_cell_count = cell_count
+
+            # Check if button is still there for next iteration
+            if await current_button.count() == 0:
+                context.log.info(f'Button disappeared after {click_count} clicks')
+                break
+
+        except Exception as e:
+            context.log.error(f'Error clicking "Load more" button on click #{click_count + 1}: {e}')
+            break
+
+    if click_count >= max_clicks:
+        context.log.warning(f'Reached maximum click limit ({max_clicks})')
+
+    context.log.info(f'Finished clicking "Load more" button. Total clicks: {click_count}')
 
 async def count_and_log_elements(page, selector, context, description):
     """Count elements and log the result"""
     elements = page.locator(selector)
     count = await elements.count()
-    log_with_emoji(context, "📊", f"{description}: {count}")
+    log_with_emoji("📊", f"{description}: {count}", "", context)
     return elements, count
 
 async def test_selectors(page, selectors, context, description="Testing selectors"):
     """Test multiple selectors and log results"""
     if DEBUG_MODE:
-        log_with_emoji(context, "🔍", f"{description}:")
+        log_with_emoji("🔍", f"{description}:", "", context)
         for selector in selectors:
             try:
                 elements = page.locator(selector)
                 count = await elements.count()
-                log_with_emoji(context, "🔍", f'Selector "{selector}": {count} elements found')
+                log_with_emoji("🔍", f'Selector "{selector}": {count} elements found', "", context)
                 if count > 0:
                     first_element = elements.first
                     html = await first_element.inner_html()
-                    log_with_emoji(context, "🔍", f'First element HTML: {html[:200]}...')
+                    log_with_emoji("🔍", f'First element HTML: {html[:200]}...', "", context)
             except Exception as e:
-                log_with_emoji(context, "🔍", f'Selector "{selector}" failed: {e}')
+                log_with_emoji("🔍", f'Selector "{selector}" failed: {e}', "", context)
 
 def create_blog_data_structures(blog_id, title, company, tags, year, url, final_result, 
                                downloaded_images, text_file_path, blog_dir, metadata_file, 
@@ -220,7 +412,7 @@ async def extract_blog_content(page, context: PlaywrightCrawlingContext) -> tupl
             if count > 0:
                 content_element = element
                 successful_selector = selector
-                log_with_emoji(context, "✅", f"Found content using selector: {selector}", f"{count} elements")
+                log_with_emoji("✅", f"Found content using selector: {selector}", f"{count} elements", context)
                 break
             else:
                 extraction_issues['content_selectors_failed'].append(f'{selector}: no elements found')
@@ -228,7 +420,7 @@ async def extract_blog_content(page, context: PlaywrightCrawlingContext) -> tupl
             error_msg = f'{selector}: {str(e)}'
             extraction_issues['content_selectors_failed'].append(error_msg)
             if DEBUG_MODE:
-                log_with_emoji(context, "🔍", f'Selector "{selector}" failed: {e}')
+                log_with_emoji("🔍", f'Selector "{selector}" failed: {e}', "", context)
             continue
     
     if not content_element:
@@ -748,13 +940,13 @@ async def save_single_record_to_database(record, storage_dir):
     def create_data_table(cursor):
         """Create the data table if it doesn't exist"""
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS data (
-            company TEXT,
-            title TEXT,
-            tags TEXT,
-            year TEXT,
-            url TEXT UNIQUE
-        )
+            CREATE TABLE IF NOT EXISTS data (
+                company TEXT,
+                title TEXT,
+                tags TEXT,
+                year TEXT,
+                url TEXT UNIQUE
+            )
         ''')
 
     def insert_record(cursor):
@@ -779,26 +971,26 @@ async def save_blog_content_to_database(blog_data, storage_dir):
     def create_blog_content_table(cursor):
         """Create the blog_content table and indexes if they don't exist"""
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS blog_content (
-            blog_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            company TEXT,
-            tags TEXT,
-            year TEXT,
-            url TEXT UNIQUE,
-            content_length INTEGER,
-            image_count INTEGER,
-            text_file_path TEXT,
-            images_dir_path TEXT,
-            extraction_method TEXT,
-            extraction_quality TEXT,
-            has_images BOOLEAN DEFAULT 0,
-            has_embedded_links BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS blog_content (
+                blog_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                company TEXT,
+                tags TEXT,
+                year TEXT,
+                url TEXT UNIQUE,
+                content_length INTEGER,
+                image_count INTEGER,
+                text_file_path TEXT,
+                images_dir_path TEXT,
+                extraction_method TEXT,
+                extraction_quality TEXT,
+                has_images BOOLEAN DEFAULT 0,
+                has_embedded_links BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
-        
+
         # Create indexes for better performance
         indexes = [
             'CREATE INDEX IF NOT EXISTS idx_blog_company ON blog_content(company)',
@@ -844,6 +1036,169 @@ async def save_blog_content_to_database(blog_data, storage_dir):
     return await execute_db_operation(db_operation, storage_dir, "Blog content database insert")
 
 
+async def parse_table_data(context: PlaywrightCrawlingContext, page, data_elements, data_count, processed_urls):
+    """Parse table data and extract blog URLs with metadata"""
+    context.log.info('📊 Table parsing enabled - processing all table data')
+    
+    # Use the data elements we already found
+    cells = data_elements
+    cell_count = data_count
+
+    # Initialize an empty table to store rows
+    table = []
+    new_blog_urls = []
+
+    # Group cells by row index (data-row-index attribute)
+    row_indices = set()
+    for i in range(cell_count):
+        row_index = await cells.nth(i).get_attribute('data-row-index')
+        if row_index:
+            row_indices.add(int(row_index))
+    
+    context.log.info(f'Processing {len(row_indices)} rows')
+        
+    # Process each row
+    for row_index in sorted(row_indices):
+        try:
+            # Initialize a list to store the row data
+            row_data = []
+
+            # Instead of finding all cells at once, target each column specifically
+            # This handles nested structures where columns might be at different depths
+            
+            # Column 0: Company
+            col_0_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="0"]')
+            if await col_0_cell.count() > 0:
+                cell_text = await col_0_cell.first.inner_text()
+                row_data.append(cell_text.strip())
+            else:
+                context.log.warning(f'Row {row_index}: Column 0 (company) not found')
+                row_data.append('')
+            
+            # Column 1: Title (may be nested deeper)
+            col_1_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="1"]')
+            if await col_1_cell.count() > 0:
+                cell_text = await col_1_cell.first.inner_text()
+                row_data.append(cell_text.strip())
+            else:
+                context.log.warning(f'Row {row_index}: Column 1 (title) not found')
+                row_data.append('')
+            
+            # Column 2: Tags
+            col_2_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="2"]')
+            if await col_2_cell.count() > 0:
+                spans = col_2_cell.first.locator('span')
+                tags_text = " ".join([await spans.nth(k).inner_text() for k in range(await spans.count())])
+                row_data.append(tags_text.strip())
+            else:
+                context.log.warning(f'Row {row_index}: Column 2 (tags) not found')
+                row_data.append('')
+            
+            # Column 3: Year
+            col_3_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="3"]')
+            if await col_3_cell.count() > 0:
+                year_text = await col_3_cell.first.inner_text()
+                row_data.append(year_text.strip())
+            else:
+                context.log.warning(f'Row {row_index}: Column 3 (year) not found')
+                row_data.append('')
+            
+            # Column 4: URL link
+            col_4_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="4"]')
+            if await col_4_cell.count() > 0:
+                # Try to find the link within the cell
+                link_element = col_4_cell.first.locator('a')
+                if await link_element.count() > 0:
+                    link = await link_element.first.get_attribute('href')
+                    row_data.append(link or '')
+                else:
+                    context.log.warning(f'Row {row_index}: No link found within column 4')
+                    row_data.append('')
+            else:
+                context.log.warning(f'Row {row_index}: Column 4 (link) not found')
+                row_data.append('')
+            
+            # Skip rows with missing critical data
+            if not row_data[0] and not row_data[1] and not row_data[4]:
+                continue
+
+            # Check for duplicates before processing
+            blog_url = row_data[4]
+            if blog_url:
+                # Check if URL was already processed in this session
+                if blog_url in processed_urls:
+                    continue
+                
+                # Check if blog content extraction was successful (unless force re-extract is enabled)
+                if FORCE_REEXTRACT_BLOGS:
+                    # Don't add to processed_urls when force re-extracting - let it be processed again
+                    pass
+                else:
+                    extraction_status = await check_blog_extraction_status(blog_url, 'storage')
+                    
+                    if extraction_status['successful']:
+                        continue
+                    
+                    # Mark URL as processed only when not force re-extracting
+                    processed_urls.add(blog_url)
+
+                # Append the row data to the table
+                table.append(row_data)
+
+                # Process and push data for each row
+                data = {
+                    'company': row_data[0],
+                    'title': row_data[1],
+                    'tags': row_data[2],
+                    'year': row_data[3],
+                    'url': row_data[4],
+                }
+
+                # Push the data to the dataset
+                await context.push_data(data)
+        
+                # Insert into database (INSERT OR IGNORE will handle duplicates)
+                await save_single_record_to_database(data, 'storage')
+                
+                # Collect blog URLs for enqueuing (only new ones)
+                if blog_url:  # If URL exists and is new
+                    blog_info = {
+                        'url': blog_url,
+                        'title': row_data[1],
+                        'company': row_data[0],
+                        'tags': row_data[2],
+                        'year': row_data[3]
+                    }
+                    
+                    # Add to blog URLs for processing (PDFs will be handled in blog URL extraction section)
+                    new_blog_urls.append(blog_info)
+            
+        except Exception as e:
+            context.log.error(f'Error processing row {row_index}: {e}')
+            continue
+
+    # Save to files if we have data
+    if table:
+        try:
+            # Create storage directory
+            storage_dir = 'storage'
+            os.makedirs(storage_dir, exist_ok=True)
+            
+            # Save to CSV file
+            csv_file_path = os.path.join(storage_dir, 'table_data.csv')
+            with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerows(table)
+
+            context.log.info(f'📊 Table parsing completed: {len(table)} rows processed, {len(new_blog_urls)} blog URLs found')
+        except Exception as e:
+            context.log.error(f'Error saving data: {e}')
+    else:
+        context.log.warning('No table data found to save.')
+    
+    return new_blog_urls
+
+
 async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     """Handle the main page - extract blog URLs and add them to queue."""
     page = context.page
@@ -853,14 +1208,16 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     
     # Add random delay to avoid rate limiting
     import random
-    await asyncio.sleep(random.uniform(1, 3))
+    await asyncio.sleep(random.uniform(2, 5))  # Increased delay for better anti-bot evasion
     
     # Initialize tracking for deduplication
-    processed_urls = set()
+    processed_urls = set()  # This will be populated during the current run
     new_blog_urls = []
     
-    # Call the load_more_handler to load all blog entries
-    await load_more_handler(context)
+    # # Call the load_more_handler to load all blog entries
+    # context.log.info('🔄 Calling load_more_handler to load all blog entries...')
+    # await load_more_handler(context)
+    # context.log.info('✅ load_more_handler completed')
 
     # Wait for page to load and check for table elements
     await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME + 1000)  # Extra wait for table elements
@@ -868,7 +1225,7 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     if DEBUG_MODE:
         # Debug: Check if the page loaded correctly
         title = await page.title()
-        log_with_emoji(context, "🔍", f'Page title: {title}')
+        log_with_emoji("🔍", f'Page title: {title}', "", context)
         
         # Debug: Check for various elements
         debug_selectors = [
@@ -913,182 +1270,14 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
         try:
             await page.wait_for_selector('div[data-row-index]', timeout=10000)
             data_count = await data_elements.count()
-            log_with_emoji(context, "📊", f'Found {data_count} table cells after waiting')
+            log_with_emoji("📊", f'Found {data_count} table cells after waiting', "", context)
         except Exception:
             context.log.warning('No table cells found, page may not have loaded properly')
             return
 
     # Table parsing logic (controlled by flag)
     if ENABLE_TABLE_PARSING:
-        context.log.info('📊 Table parsing enabled - processing all table data')
-        
-        # Use the data elements we already found
-        cells = data_elements
-        cell_count = data_count
-
-        # Initialize an empty table to store rows
-        table = []
-        blog_urls = []
-
-        # Group cells by row index (data-row-index attribute)
-        row_indices = set()
-        for i in range(cell_count):
-            row_index = await cells.nth(i).get_attribute('data-row-index')
-            if row_index:
-                row_indices.add(int(row_index))
-        
-        context.log.info(f'Processing {len(row_indices)} rows')
-        
-        # Process each row
-        for row_index in sorted(row_indices):
-            try:
-                # Initialize a list to store the row data
-                row_data = []
-
-                # Instead of finding all cells at once, target each column specifically
-                # This handles nested structures where columns might be at different depths
-                
-                # Column 0: Company
-                col_0_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="0"]')
-                if await col_0_cell.count() > 0:
-                    cell_text = await col_0_cell.first.inner_text()
-                    row_data.append(cell_text.strip())
-                else:
-                    context.log.warning(f'Row {row_index}: Column 0 (company) not found')
-                    row_data.append('')
-                
-                # Column 1: Title (may be nested deeper)
-                col_1_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="1"]')
-                if await col_1_cell.count() > 0:
-                    cell_text = await col_1_cell.first.inner_text()
-                    row_data.append(cell_text.strip())
-                else:
-                    context.log.warning(f'Row {row_index}: Column 1 (title) not found')
-                    row_data.append('')
-                
-                # Column 2: Tags
-                col_2_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="2"]')
-                if await col_2_cell.count() > 0:
-                    spans = col_2_cell.first.locator('span')
-                    tags_text = " ".join([await spans.nth(k).inner_text() for k in range(await spans.count())])
-                    row_data.append(tags_text.strip())
-                else:
-                    context.log.warning(f'Row {row_index}: Column 2 (tags) not found')
-                    row_data.append('')
-                
-                # Column 3: Year
-                col_3_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="3"]')
-                if await col_3_cell.count() > 0:
-                    year_text = await col_3_cell.first.inner_text()
-                    row_data.append(year_text.strip())
-                else:
-                    context.log.warning(f'Row {row_index}: Column 3 (year) not found')
-                    row_data.append('')
-                
-                # Column 4: URL link
-                col_4_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="4"]')
-                if await col_4_cell.count() > 0:
-                    link = await col_4_cell.first.locator('a').get_attribute('href')
-                    row_data.append(link or '')
-                else:
-                    context.log.warning(f'Row {row_index}: Column 4 (link) not found')
-                    row_data.append('')
-                
-                # Debug: Log the extracted URL
-                link = row_data[4]
-                if link:
-                    context.log.info(f'🔗 Extracted URL: {link}')
-                
-                # Skip rows with missing critical data
-                if not row_data[0] and not row_data[1] and not row_data[4]:
-                    context.log.warning(f'Row {row_index} has no company, title, or URL, skipping')
-                    continue
-
-                # Check for duplicates before processing
-                blog_url = row_data[4]
-                if blog_url:
-                    # Check if URL was already processed in this session
-                    if blog_url in processed_urls:
-                        context.log.info(f'🔄 Skipping duplicate URL (session): {blog_url}')
-                        continue
-                    
-                    # Check if blog content extraction was successful (unless force re-extract is enabled)
-                    context.log.info(f'🔍 DEBUG: FORCE_REEXTRACT_BLOGS = {FORCE_REEXTRACT_BLOGS}')
-                    if FORCE_REEXTRACT_BLOGS:
-                        context.log.info(f'🔄 Force re-extracting URL: {blog_url} (FORCE_REEXTRACT_BLOGS=True)')
-                    else:
-                        context.log.info(f'🔍 DEBUG: Checking extraction status for {blog_url}')
-                        extraction_status = await check_blog_extraction_status(blog_url, 'storage')
-                        
-                        if extraction_status['successful']:
-                            context.log.info(f'✅ Skipping URL (successful extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, length: {extraction_status.get("content_length", 0)})')
-                            continue
-                        elif extraction_status['exists']:
-                            context.log.info(f'🔄 Retrying URL (failed extraction): {blog_url} (quality: {extraction_status.get("quality", "unknown")}, reason: {extraction_status.get("reason", "unknown")})')
-                        else:
-                            context.log.info(f'📝 New URL (no record): {blog_url} (reason: {extraction_status.get("reason", "unknown")})')
-                    
-                    # Mark URL as processed
-                    processed_urls.add(blog_url)
-
-                # Append the row data to the table
-                table.append(row_data)
-
-                # Process and push data for each row
-                data = {
-                    'company': row_data[0],
-                    'title': row_data[1],
-                    'tags': row_data[2],
-                    'year': row_data[3],
-                    'url': row_data[4],
-                }
-
-                # Push the data to the dataset
-                await context.push_data(data)
-                
-                # Insert into database immediately (async I/O)
-                await save_single_record_to_database(data, 'storage')
-                
-                # Collect blog URLs for enqueuing (only new ones)
-                if blog_url:  # If URL exists and is new
-                    blog_info = {
-                        'url': blog_url,
-                        'title': row_data[1],
-                        'company': row_data[0],
-                        'tags': row_data[2],
-                        'year': row_data[3]
-                    }
-                    
-                    # Add to blog URLs for processing (PDFs will be handled in blog URL extraction section)
-                    new_blog_urls.append(blog_info)
-                    context.log.info(f'📝 Added new blog URL: {blog_info["url"]} - {blog_info["title"]}')
-                
-            except Exception as e:
-                context.log.error(f'Error processing row {row_index}: {e}')
-                continue
-
-        context.log.info(f'Successfully extracted {len(table)} rows')
-        
-        # Save to files if we have data
-        if table:
-            try:
-                # Create storage directory
-                storage_dir = 'storage'
-                os.makedirs(storage_dir, exist_ok=True)
-                
-                # Save to CSV file
-                csv_file_path = os.path.join(storage_dir, 'table_data.csv')
-                with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerows(table)
-        
-                # Database records are already saved individually during processing
-                # CSV file serves as a backup/analysis file
-                context.log.info(f'Data saved to {storage_dir}/ - {len(table)} rows processed (database records saved individually, CSV created for backup)')
-            except Exception as e:
-                context.log.error(f'Error saving data: {e}')
-        else:
-            context.log.warning('No table data found to save.')
+        new_blog_urls = await parse_table_data(context, page, data_elements, data_count, processed_urls)
     else:
         context.log.info('🚀 Table parsing disabled - focusing on enqueuing blog links')
         new_blog_urls = []  # Initialize empty for enqueuing logic
@@ -1104,18 +1293,56 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
         
         context.log.info(f'🔍 Found {link_count} blog links on main page')
         
+        # Get problematic URLs from database (failed extractions, low quality, etc.)
+        problematic_urls = get_problematic_urls_from_database()
+        
+        # Option to test ONLY problematic URLs (for debugging anti-bot measures)
+        # This is set by the main function based on command-line arguments
+        import sys
+        TEST_ONLY_PROBLEMATIC_DOMAINS = getattr(sys.modules[__name__], 'TEST_ONLY_PROBLEMATIC_DOMAINS', False)
+        
         if link_count == 0:
             context.log.warning('No blog links found on main page')
+            # Debug: Check if the page has loaded properly
+            page_content = await page.content()
+            if 'data-col-index="4"' in page_content:
+                context.log.info('🔍 Found data-col-index="4" in page content, but no links found')
+            else:
+                context.log.warning('🔍 No data-col-index="4" found in page content - page may not have loaded properly')
             return
         
         # Extract URLs and metadata with deduplication
         blog_requests = []
+        pdf_count = 0
+        skipped_count = 0
+        # Limit processing to MAX_BLOGS_TO_PROCESS
         limit = MAX_BLOGS_TO_PROCESS if MAX_BLOGS_TO_PROCESS > 0 else link_count
+        context.log.info(f'🔍 Processing {min(link_count, limit)} links (limit: {limit})')
+        
         for i in range(min(link_count, limit)):
             try:
                 # Get the link element
                 link_element = blog_links.nth(i)
                 href = await link_element.get_attribute('href')
+                
+                # Check if URL is in the problematic URLs list from database
+                if href:
+                    is_problematic = href in problematic_urls
+                    
+                    if TEST_ONLY_PROBLEMATIC_DOMAINS:
+                        # Only process problematic URLs when testing
+                        if not is_problematic:
+                            context.log.info(f'🔍 Skipping non-problematic URL: {href}')
+                            skipped_count += 1
+                            continue
+                        else:
+                            context.log.info(f'🧪 Testing problematic URL: {href}')
+                    else:
+                        # Skip problematic URLs in normal mode
+                        if is_problematic:
+                            context.log.warning(f'🚫 Skipping problematic URL: {href}')
+                            skipped_count += 1
+                            continue
                 
                 # Extract company, title, tags, and year from the same row
                 company = ""
@@ -1161,15 +1388,19 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                     context.log.warning(f'Could not extract metadata for row {i}: {e}')
                 
                 if href:
+                    context.log.info(f'🔍 Processing URL {i+1}/{min(link_count, limit)}: {href}')
                     # Check for duplicates before enqueuing
                     if href in processed_urls:
                         context.log.info(f'🔄 Skipping duplicate URL (session): {href}')
+                        context.log.info(f'🔍 DEBUG: processed_urls contains {len(processed_urls)} URLs so far')
+                        skipped_count += 1
                         continue
                     
                     # Check if blog content extraction was successful (unless force re-extract is enabled)
                     context.log.info(f'🔍 DEBUG: FORCE_REEXTRACT_BLOGS = {FORCE_REEXTRACT_BLOGS}')
                     if FORCE_REEXTRACT_BLOGS:
                         context.log.info(f'🔄 Force re-extracting URL: {href} (FORCE_REEXTRACT_BLOGS=True)')
+                        # Skip extraction status check when force re-extract is enabled
                     else:
                         context.log.info(f'🔍 DEBUG: Checking extraction status for {href}')
                         extraction_status = await check_blog_extraction_status(href, 'storage')
@@ -1186,11 +1417,16 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                     processed_urls.add(href)
                     
                     # Check if it's a PDF URL and handle immediately with company info
-                    if (href.lower().endswith('.pdf') or 
-                        '/pdf/' in href.lower() or 
-                        'arxiv.org/pdf' in href.lower()):
+                    is_pdf = (href.lower().endswith('.pdf') or 
+                             '/pdf/' in href.lower() or 
+                             'arxiv.org/pdf' in href.lower())
+                    
+                    context.log.info(f'🔍 URL type check: {href} -> PDF: {is_pdf}')
+                    
+                    if is_pdf:
                         context.log.info(f'📄 Processing PDF immediately with company info: {href} (Company: {company})')
                         await handle_pdf_url_directly(href, context, company=company, title=title, tags=tags, year=year)
+                        pdf_count += 1
                     else:
                         # Add blog request for non-PDF URLs with metadata
                         request = Request.from_url(href, user_data={
@@ -1202,10 +1438,21 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                         })
                         context.log.info(f'📝 Added blog request: {href} (Company: {company}, Tags: {tags}, Year: {year})')
                         blog_requests.append(request)
+                else:
+                    context.log.warning(f'⚠️ Empty href for link {i+1}/{min(link_count, limit)}')
+                    continue
                 
             except Exception as e:
                 context.log.warning(f'Error processing link {i}: {e}')
                 continue
+        
+        # Summary of processing
+        context.log.info(f'📊 Processing Summary:')
+        context.log.info(f'   - Total links found: {link_count}')
+        context.log.info(f'   - Links processed: {min(link_count, limit)} (limited by MAX_BLOGS_TO_PROCESS)')
+        context.log.info(f'   - PDFs processed: {pdf_count}')
+        context.log.info(f'   - URLs skipped: {skipped_count}')
+        context.log.info(f'   - Blog requests created: {len(blog_requests)}')
         
         # Add all blog requests to the queue
         if blog_requests:
@@ -1213,6 +1460,8 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
             context.log.info(f'✅ Added {len(blog_requests)} new blog requests to queue')
         else:
             context.log.warning('No new blog URLs found to add to queue')
+            if pdf_count > 0:
+                context.log.info(f'💡 Note: {pdf_count} PDFs were processed directly (not added to blog queue)')
             
     except Exception as e:
         context.log.error(f'Error processing main page: {e}')
@@ -1222,6 +1471,25 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
     """Handle blog content extraction using hybrid approach."""
     page = context.page
     url = context.request.url
+    
+    # Check for common HTTP error status codes
+    try:
+        response = await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        if response and response.status >= 400:
+            if response.status == 403:
+                context.log.warning(f'🚫 Access forbidden (403) for {url} - likely anti-bot protection')
+                return
+            elif response.status == 404:
+                context.log.warning(f'🚫 Page not found (404) for {url} - URL may be outdated')
+                return
+            elif response.status == 410:
+                context.log.warning(f'🚫 Content gone (410) for {url} - content has been removed')
+                return
+            elif response.status >= 500:
+                context.log.warning(f'🚫 Server error ({response.status}) for {url}')
+                return
+    except Exception as e:
+        context.log.warning(f'⚠️ Error checking page status for {url}: {e}')
     
     context.log.info(f'🔍 Processing blog content: {url}')
     

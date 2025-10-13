@@ -3,7 +3,6 @@ import sys
 # sys.path.insert(0, local_crawler_path)
 
 import logging
-import argparse
 from datetime import timedelta
 from crawlee.crawlers import PlaywrightCrawler
 from crawlee.http_clients import HttpxHttpClient
@@ -51,22 +50,29 @@ configure_logger_with_line_numbers('sys_design_crawlee')
 import crawlee
 logging.info(f'Crawlee version: {crawlee.__version__} and path: {crawlee.__path__}')
 
-async def main(max_blogs: int = -1, force_reextract: bool = False) -> None:
+async def main(max_blogs: int = -1, force_reextract: bool = False, test_problematic: bool = False) -> None:
     """The crawler entry point.
     
     Args:
         max_blogs: Maximum number of blog URLs to process. -1 means no limit.
         force_reextract: If True, re-extract all blog content even if previously extracted successfully.
+        test_problematic: If True, only process problematic domains for testing anti-bot improvements.
     """
     # Set the global limit for blog processing
     import sys_design_crawlee.routes as routes_module
     routes_module.MAX_BLOGS_TO_PROCESS = max_blogs
     routes_module.FORCE_REEXTRACT_BLOGS = force_reextract
+    routes_module.TEST_ONLY_PROBLEMATIC_DOMAINS = test_problematic
     
     if force_reextract:
         print("🔄 FORCE_REEXTRACT_BLOGS=True - Will re-extract all blog content regardless of previous status")
     else:
         print("✅ FORCE_REEXTRACT_BLOGS=False - Will skip previously extracted content")
+    
+    if test_problematic:
+        print("🧪 TEST_ONLY_PROBLEMATIC_DOMAINS=True - Will ONLY process problematic URLs (failed extractions, low quality)")
+    else:
+        print("✅ TEST_ONLY_PROBLEMATIC_DOMAINS=False - Will process all URLs normally")
     
     # Calculate max_requests_per_crawl based on max_blogs
     if max_blogs > 0:

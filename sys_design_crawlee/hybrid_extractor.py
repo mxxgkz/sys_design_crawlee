@@ -6,6 +6,7 @@ Combines multiple mature strategies for robust blog content extraction
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import urllib3
@@ -18,6 +19,7 @@ from readability import Document
 import requests
 from playwright.async_api import Page
 from bs4 import BeautifulSoup
+from .logging_utils import log_with_emoji
 
 # Disable SSL warnings since we're bypassing verification for problematic sites
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -72,7 +74,7 @@ class HybridContentExtractor:
             if context:
                 context.log.info(f"Trying Newspaper3k extraction for {url}")
             
-            newspaper_result = await self._extract_with_newspaper(url)
+            newspaper_result = await self._extract_with_newspaper(url, context)
             if newspaper_result and newspaper_result.get('text'):
                 content_length = len(newspaper_result.get('text', ''))
                 # Always enhance with comprehensive image extraction, regardless of content length
@@ -120,7 +122,7 @@ class HybridContentExtractor:
             if context:
                 context.log.info(f"Trying Readability extraction for {url}")
             
-            readability_result = await self._extract_with_readability(url)
+            readability_result = await self._extract_with_readability(url, context)
             if readability_result and readability_result.get('text'):
                 content_length = len(readability_result.get('text', ''))
                 # Always enhance with comprehensive image extraction, regardless of content length
@@ -290,7 +292,7 @@ class HybridContentExtractor:
             'Upgrade-Insecure-Requests': '1',
         }
     
-    def _extract_content_manually(self, html_content: str) -> Optional[Dict[str, Any]]:
+    def _extract_content_manually(self, html_content: str, context=None) -> Optional[Dict[str, Any]]:
         """
         Manually extract content from HTML using BeautifulSoup when automated methods fail.
         
@@ -349,7 +351,7 @@ class HybridContentExtractor:
                 if elements:
                     text_content = ' '.join([elem.get_text(strip=True) for elem in elements])
                     if len(text_content) > 100:
-                        print(f"🔍 Found content with selector '{selector}': {len(text_content)} chars")
+                        log_with_emoji("🔍", f"Found content with selector '{selector}'", f"{len(text_content)} chars", context)
                         return {
                             'text': text_content,
                             'images': all_images,
@@ -362,7 +364,7 @@ class HybridContentExtractor:
             if text_containers:
                 text_content = ' '.join([elem.get_text(strip=True) for elem in text_containers])
                 if len(text_content) > 100:
-                    print(f"🔍 Found content with text containers: {len(text_content)} chars")
+                    log_with_emoji("🔍", "Found content with text containers", f"{len(text_content)} chars", context)
                     return {
                         'text': text_content,
                         'images': all_images,
@@ -379,7 +381,7 @@ class HybridContentExtractor:
                 if meaningful_texts:
                     text_content = ' '.join(meaningful_texts)
                     if len(text_content) > 500:  # Only if we get substantial content
-                        print(f"🔍 Found content with text elements: {len(text_content)} chars")
+                        log_with_emoji("🔍", "Found content with text elements", f"{len(text_content)} chars", context)
                         return {
                             'text': text_content,
                             'images': all_images,
@@ -388,7 +390,7 @@ class HybridContentExtractor:
                         }
             
             # Ultra-aggressive fallback: extract all text from the body and filter
-            print("🔍 Trying ultra-aggressive text extraction...")
+            log_with_emoji("🔍", "Trying ultra-aggressive text extraction...", "", context)
             body = soup.find('body')
             if body:
                 # Remove script, style, nav, header, footer elements
@@ -405,7 +407,7 @@ class HybridContentExtractor:
                 if meaningful_paragraphs:
                     text_content = '\n\n'.join(meaningful_paragraphs)
                     if len(text_content) > 500:
-                        print(f"🔍 Found content with ultra-aggressive extraction: {len(text_content)} chars")
+                        log_with_emoji("🔍", "Found content with ultra-aggressive extraction", f"{len(text_content)} chars", context)
                         return {
                             'text': text_content,
                             'images': all_images,
@@ -416,7 +418,7 @@ class HybridContentExtractor:
             return None
             
         except Exception as e:
-            print(f"⚠️ Manual extraction failed: {e}")
+            log_with_emoji("⚠️", "Manual extraction failed", str(e), context)
             return None
     
     def _extract_images_from_elements(self, elements) -> List[Dict[str, Any]]:
@@ -437,13 +439,13 @@ class HybridContentExtractor:
                             'height': img.get('height', '')
                         })
         except Exception as e:
-            print(f"⚠️ Image extraction from elements failed: {e}")
+            log_with_emoji("⚠️", "Image extraction from elements failed", str(e))
         return images
 
-    async def _extract_with_newspaper(self, url: str) -> Optional[Dict[str, Any]]:
+    async def _extract_with_newspaper(self, url: str, context=None) -> Optional[Dict[str, Any]]:
         """Extract content using Newspaper3k with SSL bypass"""
         try:
-            print(f"🔍 Trying Newspaper3k extraction for: {url}")
+            log_with_emoji("🔍", "Trying Newspaper3k extraction", url, context)
             
             session = self._create_ssl_bypass_session()
             headers = self._get_standard_headers()
@@ -454,7 +456,7 @@ class HybridContentExtractor:
                 response.raise_for_status()
                 html_content = response.text
                 
-                print(f"📄 Downloaded HTML content: {len(html_content)} chars")
+                log_with_emoji("📄", "Downloaded HTML content", f"{len(html_content)} chars", context)
                 
                 # Create article and set HTML content directly
                 article = Article(url)
@@ -462,8 +464,8 @@ class HybridContentExtractor:
                 article.parse()
                 
             except Exception as download_error:
-                print(f"⚠️ Direct download failed: {download_error}")
-                print(f"🔄 Falling back to standard newspaper3k method...")
+                log_with_emoji("⚠️", "Direct download failed", str(download_error), context)
+                log_with_emoji("🔄", "Falling back to standard newspaper3k method...", "", context)
                 
                 # Fallback to standard method
                 article = Article(url)
@@ -478,15 +480,15 @@ class HybridContentExtractor:
             
             # Check if we got any content
             if not article.text or len(article.text.strip()) < 50:
-                print(f"⚠️ Newspaper3k: Insufficient content ({len(article.text)} chars)")
-                print(f"🔍 Debug: Article title: {article.title}")
-                print(f"🔍 Debug: Article authors: {article.authors}")
-                print(f"🔍 Debug: Article publish_date: {article.publish_date}")
-                print(f"🔍 Debug: Article top_image: {article.top_image}")
-                print(f"🔍 Debug: Article images count: {len(article.images) if article.images else 0}")
+                log_with_emoji("⚠️", "Newspaper3k: Insufficient content", f"{len(article.text)} chars", context)
+                log_with_emoji("🔍", "Debug: Article title", str(article.title), context)
+                log_with_emoji("🔍", "Debug: Article authors", str(article.authors), context)
+                log_with_emoji("🔍", "Debug: Article publish_date", str(article.publish_date), context)
+                log_with_emoji("🔍", "Debug: Article top_image", str(article.top_image), context)
+                log_with_emoji("🔍", "Debug: Article images count", str(len(article.images) if article.images else 0), context)
                 
                 # Try to extract content manually from HTML
-                manual_result = self._extract_content_manually(html_content)
+                manual_result = self._extract_content_manually(html_content, context)
                 if manual_result and manual_result.get('text'):
                     article.text = manual_result['text']
                     # Add manual images to the article images
@@ -494,26 +496,26 @@ class HybridContentExtractor:
                         for img_info in manual_result['images']:
                             if img_info.get('src'):
                                 article.images.add(img_info['src'])
-                    print(f"✅ Manual extraction successful: {len(article.text)} chars, {len(manual_result.get('images', []))} images")
+                    log_with_emoji("✅", "Manual extraction successful", f"{len(article.text)} chars, {len(manual_result.get('images', []))} images", context)
                 else:
-                    print(f"⚠️ Manual extraction also failed")
+                    log_with_emoji("⚠️", "Manual extraction also failed", "", context)
                     return None
             
-            print(f"✅ Newspaper3k: Found {len(article.text)} characters of content")
+            log_with_emoji("✅", "Newspaper3k: Found content", f"{len(article.text)} characters", context)
             
             # Download and process images
             images = []
             if article.images:
                 # Convert set to list and limit to 10 images
                 image_list = list(article.images)[:10]
-                print(f"📸 Processing {len(image_list)} images...")
+                log_with_emoji("📸", "Processing images", f"{len(image_list)} images", context)
                 for i, img_url in enumerate(image_list):
                     try:
                         img_info = await self._process_image(img_url, url, i)
                         if img_info:
                             images.append(img_info)
                     except Exception as e:
-                        print(f"Error processing image {img_url}: {e}")
+                        log_with_emoji("⚠️", f"Error processing image {img_url}", str(e), context)
                         continue
             
             return {
@@ -531,13 +533,13 @@ class HybridContentExtractor:
             }
             
         except Exception as e:
-            print(f"❌ Newspaper3k extraction failed: {e}")
+            log_with_emoji("❌", "Newspaper3k extraction failed", str(e), context)
             return None
     
-    async def _extract_with_readability(self, url: str) -> Optional[Dict[str, Any]]:
+    async def _extract_with_readability(self, url: str, context=None) -> Optional[Dict[str, Any]]:
         """Extract content using Readability-lxml"""
         try:
-            print(f"🔍 Trying Readability extraction for: {url}")
+            log_with_emoji("🔍", "Trying Readability extraction", url, context)
             
             session = self._create_ssl_bypass_session()
             headers = self._get_standard_headers()
@@ -553,7 +555,7 @@ class HybridContentExtractor:
             title = doc.title()
             summary = doc.summary()
             
-            print(f"📄 Readability: HTML content length: {len(content_html)} chars")
+            log_with_emoji("📄", "Readability: HTML content length", f"{len(content_html)} chars", context)
             
             # Extract text from HTML content
             soup = BeautifulSoup(content_html, 'html.parser')
@@ -563,14 +565,14 @@ class HybridContentExtractor:
             text_content = re.sub(r'\n\s*\n', '\n\n', text_content)  # Remove excessive newlines
             text_content = text_content.strip()
             
-            print(f"📄 Readability: Text content length: {len(text_content)} chars")
+            log_with_emoji("📄", "Readability: Text content length", f"{len(text_content)} chars", context)
             
             # Check if we got sufficient content
             if len(text_content) < 50:
-                print(f"⚠️ Readability: Insufficient content ({len(text_content)} chars)")
+                log_with_emoji("⚠️", "Readability: Insufficient content", f"{len(text_content)} chars", context)
                 return None
             
-            print(f"✅ Readability: Found {len(text_content)} characters of content")
+            log_with_emoji("✅", "Readability: Found content", f"{len(text_content)} characters", context)
             
             return {
                 'text': text_content,
@@ -584,7 +586,7 @@ class HybridContentExtractor:
             }
             
         except Exception as e:
-            print(f"❌ Readability extraction failed: {e}")
+            log_with_emoji("❌", "Readability extraction failed", str(e), context)
             return None
     
     async def _extract_with_playwright(self, page: Page, url: str, context) -> Optional[Dict[str, Any]]:
@@ -682,7 +684,7 @@ class HybridContentExtractor:
                         continue
                         
             except Exception as e:
-                print(f"⚠️ Image extraction failed: {e}")
+                log_with_emoji("⚠️", "Image extraction failed", str(e), context)
                 pass
             
             return {
@@ -696,7 +698,7 @@ class HybridContentExtractor:
             }
             
         except Exception as e:
-            print(f"Playwright extraction failed: {e}")
+            log_with_emoji("❌", "Playwright extraction failed", str(e), context)
             return None
     
     async def _process_image(self, img_url: str, base_url: str, index: int, alt_text: str = "") -> Optional[Dict[str, Any]]:
@@ -704,7 +706,7 @@ class HybridContentExtractor:
         try:
             # Skip data URLs (inline images like SVG, base64, etc.)
             if img_url.startswith('data:'):
-                print(f"⏭️ Skipping data URL image: {img_url[:50]}...")
+                log_with_emoji("⏭️", "Skipping data URL image", f"{img_url[:50]}...", None)
                 return None
             
             # Make URL absolute
@@ -741,7 +743,7 @@ class HybridContentExtractor:
                         }
             
         except Exception as e:
-            print(f"Error processing image {img_url}: {e}")
+            log_with_emoji("⚠️", f"Error processing image {img_url}", str(e), None)
             return None
     
     def generate_blog_id(self, url: str, title: str) -> str:
