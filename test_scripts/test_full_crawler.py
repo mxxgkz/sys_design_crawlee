@@ -10,6 +10,7 @@ python test_full_crawler.py --full --force-reextract
 python test_full_crawler.py --max-blogs 20 -r
 
 python ./test_scripts/test_full_crawler.py --max-blogs 100 -r 2>&1 | tee logs/crawler_$(date +%Y%m%d_%H%M%S).log
+python ./test_scripts/test_full_crawler.py -f -r 2>&1 | tee logs/crawler_$(date +%Y%m%d_%H%M%S).log
 """
 
 import asyncio

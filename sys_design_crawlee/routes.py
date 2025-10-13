@@ -935,26 +935,49 @@ async def check_blog_extraction_status(url, storage_dir):
         return {'exists': False, 'successful': False, 'reason': 'error', 'error': str(e)}
 
 async def save_single_record_to_database(record, storage_dir):
-    """Save a single record to SQLite database with async I/O operations."""
+    """
+    Save a single record to SQLite database with async I/O operations.
+    
+    This function prevents duplicate records by checking if the URL already exists
+    before attempting to insert. If the URL exists, the insertion is skipped.
+    
+    Args:
+        record: Dictionary containing company, title, tags, year, url
+        storage_dir: Directory where the database is stored
+        
+    Returns:
+        bool: True if record was inserted, False if skipped due to duplicate URL
+    """
     
     def create_data_table(cursor):
         """Create the data table if it doesn't exist"""
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS data (
-                company TEXT,
-                title TEXT,
-                tags TEXT,
-                year TEXT,
-                url TEXT UNIQUE
-            )
+        CREATE TABLE IF NOT EXISTS data (
+            company TEXT,
+            title TEXT,
+            tags TEXT,
+            year TEXT,
+                    url TEXT UNIQUE
+        )
         ''')
 
     def insert_record(cursor):
-        """Insert the record into the data table"""
+        """Insert the record into the data table only if URL doesn't exist"""
+        # First check if URL already exists
+        cursor.execute('SELECT COUNT(*) FROM data WHERE url = ?', (record['url'],))
+        count = cursor.fetchone()[0]
+        
+        if count > 0:
+            # URL already exists, skip insertion
+            print(f"⏭️ Skipping duplicate URL: {record['url']}")
+            return False
+        
+        # URL doesn't exist, insert the record
         cursor.execute(
-            'INSERT OR IGNORE INTO data (company, title, tags, year, url) VALUES (?, ?, ?, ?, ?)', 
+            'INSERT INTO data (company, title, tags, year, url) VALUES (?, ?, ?, ?, ?)', 
             (record['company'], record['title'], record['tags'], record['year'], record['url'])
         )
+        print(f"✅ Inserted new record: {record['url']}")
         return True
     
     def db_operation(cursor):
@@ -963,6 +986,35 @@ async def save_single_record_to_database(record, storage_dir):
         return insert_record(cursor)
     
     return await execute_db_operation(db_operation, storage_dir, "Single record database insert")
+
+
+async def check_data_table_status(storage_dir):
+    """Check the current status of the data table for debugging"""
+    
+    def get_table_info(cursor):
+        """Get information about the data table"""
+        # Check if table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='data'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            return {'exists': False, 'count': 0, 'sample_urls': []}
+        
+        # Get total count
+        cursor.execute('SELECT COUNT(*) FROM data')
+        count = cursor.fetchone()[0]
+        
+        # Get sample URLs
+        cursor.execute('SELECT url FROM data LIMIT 5')
+        sample_urls = [row[0] for row in cursor.fetchall()]
+        
+        return {
+            'exists': True,
+            'count': count,
+            'sample_urls': sample_urls
+        }
+    
+    return await execute_db_operation(get_table_info, storage_dir, "Check data table status")
 
 
 async def save_blog_content_to_database(blog_data, storage_dir):
@@ -1156,8 +1208,8 @@ async def parse_table_data(context: PlaywrightCrawlingContext, page, data_elemen
 
                 # Push the data to the dataset
                 await context.push_data(data)
-        
-                # Insert into database (INSERT OR IGNORE will handle duplicates)
+    
+                # Insert into database (function will check for duplicates and skip if exists)
                 await save_single_record_to_database(data, 'storage')
                 
                 # Collect blog URLs for enqueuing (only new ones)
@@ -1189,7 +1241,7 @@ async def parse_table_data(context: PlaywrightCrawlingContext, page, data_elemen
             with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerows(table)
-
+    
             context.log.info(f'📊 Table parsing completed: {len(table)} rows processed, {len(new_blog_urls)} blog URLs found')
         except Exception as e:
             context.log.error(f'Error saving data: {e}')
@@ -1214,10 +1266,10 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     processed_urls = set()  # This will be populated during the current run
     new_blog_urls = []
     
-    # # Call the load_more_handler to load all blog entries
-    # context.log.info('🔄 Calling load_more_handler to load all blog entries...')
-    # await load_more_handler(context)
-    # context.log.info('✅ load_more_handler completed')
+    # Call the load_more_handler to load all blog entries
+    context.log.info('🔄 Calling load_more_handler to load all blog entries...')
+    await load_more_handler(context)
+    context.log.info('✅ load_more_handler completed')
 
     # Wait for page to load and check for table elements
     await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME + 1000)  # Extra wait for table elements
@@ -1337,12 +1389,6 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                             continue
                         else:
                             context.log.info(f'🧪 Testing problematic URL: {href}')
-                    else:
-                        # Skip problematic URLs in normal mode
-                        if is_problematic:
-                            context.log.warning(f'🚫 Skipping problematic URL: {href}')
-                            skipped_count += 1
-                            continue
                 
                 # Extract company, title, tags, and year from the same row
                 company = ""
