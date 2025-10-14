@@ -224,3 +224,4 @@ blog_data = processor.extract_blog_content(limit=10)  # Process 10 at a time
 - Categorization is based on keyword matching and TF-IDF similarity
 - Company-specific weights improve accuracy for known companies
 - The system is designed to be extensible and customizable
+

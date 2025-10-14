@@ -10,3 +10,4 @@ tqdm>=4.65.0
 
 # Note: sqlite3 is built-in with Python
 # Note: matplotlib and seaborn are optional for analytics
+
