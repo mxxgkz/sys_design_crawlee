@@ -50,7 +50,7 @@ configure_logger_with_line_numbers('sys_design_crawlee')
 import crawlee
 logging.info(f'Crawlee version: {crawlee.__version__} and path: {crawlee.__path__}')
 
-async def main(max_blogs: int = -1, force_reextract: bool = False, test_problematic: bool = False) -> None:
+async def main(max_blogs: int = -1, force_reextract: bool = False, load_more: bool = False, test_problematic: bool = False) -> None:
     """The crawler entry point.
     
     Args:
@@ -62,12 +62,18 @@ async def main(max_blogs: int = -1, force_reextract: bool = False, test_problema
     import sys_design_crawlee.routes as routes_module
     routes_module.MAX_BLOGS_TO_PROCESS = max_blogs
     routes_module.FORCE_REEXTRACT_BLOGS = force_reextract
+    routes_module.LOAD_MORE = load_more
     routes_module.TEST_ONLY_PROBLEMATIC_DOMAINS = test_problematic
     
     if force_reextract:
         print("🔄 FORCE_REEXTRACT_BLOGS=True - Will re-extract all blog content regardless of previous status")
     else:
         print("✅ FORCE_REEXTRACT_BLOGS=False - Will skip previously extracted content")
+        
+    if load_more:
+        print("🔄 LOAD_MORE=True - Will load more blogs")
+    else:
+        print("✅ LOAD_MORE=False - Will not load more blogs")
     
     if test_problematic:
         print("🧪 TEST_ONLY_PROBLEMATIC_DOMAINS=True - Will ONLY process problematic URLs (failed extractions, low quality)")

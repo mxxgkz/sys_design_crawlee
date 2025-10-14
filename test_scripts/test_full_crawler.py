@@ -11,6 +11,7 @@ python test_full_crawler.py --max-blogs 20 -r
 
 python ./test_scripts/test_full_crawler.py --max-blogs 100 -r 2>&1 | tee logs/crawler_$(date +%Y%m%d_%H%M%S).log
 python ./test_scripts/test_full_crawler.py -f -r 2>&1 | tee logs/crawler_$(date +%Y%m%d_%H%M%S).log
+python ./test_scripts/test_full_crawler.py -l -f -r 2>&1 | tee logs/crawler_$(date +%Y%m%d_%H%M%S).log
 """
 
 import asyncio
@@ -101,6 +102,8 @@ if __name__ == "__main__":
                        help='Run full crawler with no limit')
     parser.add_argument('--force-reextract', '--force', '-r', action='store_true', 
                        help='Force re-extraction of all blog content regardless of previous status')
+    parser.add_argument('--load-more', '-l', action='store_true', 
+                       help='Load more blogs from the main page')
     parser.add_argument('--test-problematic', '-p', action='store_true', 
                        help='Test ONLY problematic URLs (failed extractions, low quality) to verify anti-bot improvements')
     
@@ -111,4 +114,4 @@ if __name__ == "__main__":
         asyncio.run(test_full_crawler(force_reextract=args.force_reextract, test_problematic=args.test_problematic))
     else:
         print(f"🧪 Starting Limited Crawler Test ({args.max_blogs} blogs)")
-        asyncio.run(test_crawler_with_limit(args.max_blogs, force_reextract=args.force_reextract, test_problematic=args.test_problematic))
+        asyncio.run(test_crawler_with_limit(args.max_blogs, force_reextract=args.force_reextract, load_more=args.load_more, test_problematic=args.test_problematic))

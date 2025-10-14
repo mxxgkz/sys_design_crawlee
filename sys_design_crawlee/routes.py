@@ -25,6 +25,9 @@ ENABLE_TABLE_PARSING = True  # -1 means no limit
 # Flag to force re-extraction of blog content even if previously extracted successfully
 FORCE_REEXTRACT_BLOGS = True  # Set to True to re-extract all blogs regardless of previous status
 
+# Flag to control load more - set to True to load more blogs
+LOAD_MORE = False
+
 # Global counters for tracking success/failure rates
 PDF_SUCCESS_COUNT = 0
 PDF_FAILURE_COUNT = 0
@@ -275,7 +278,7 @@ def create_blog_data_structures(blog_id, title, company, tags, year, url, final_
     content_length = len(final_result.get('text', ''))
     image_count = len(downloaded_images)
     text_file_path_str = str(text_file_path)
-    images_dir_path_str = str(blog_dir / 'images')
+    images_dir_path_str = str(blog_dir / 'images')  # Images are saved to individual blog directories
     extraction_method = final_result.get('extraction_method', 'unknown')
     extraction_quality = extraction_results['extraction_quality']
     has_images = image_count > 0
@@ -957,7 +960,7 @@ async def save_single_record_to_database(record, storage_dir):
             title TEXT,
             tags TEXT,
             year TEXT,
-                    url TEXT UNIQUE
+            url TEXT UNIQUE
         )
         ''')
 
@@ -1213,17 +1216,16 @@ async def parse_table_data(context: PlaywrightCrawlingContext, page, data_elemen
                 await save_single_record_to_database(data, 'storage')
                 
                 # Collect blog URLs for enqueuing (only new ones)
-                if blog_url:  # If URL exists and is new
-                    blog_info = {
-                        'url': blog_url,
-                        'title': row_data[1],
-                        'company': row_data[0],
-                        'tags': row_data[2],
-                        'year': row_data[3]
-                    }
-                    
-                    # Add to blog URLs for processing (PDFs will be handled in blog URL extraction section)
-                    new_blog_urls.append(blog_info)
+                blog_info = {
+                    'url': blog_url,
+                    'title': row_data[1],
+                    'company': row_data[0],
+                    'tags': row_data[2],
+                    'year': row_data[3]
+                }
+                
+                # Add to blog URLs for processing (PDFs will be handled in blog URL extraction section)
+                new_blog_urls.append(blog_info)
             
         except Exception as e:
             context.log.error(f'Error processing row {row_index}: {e}')
@@ -1267,9 +1269,10 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
     new_blog_urls = []
     
     # Call the load_more_handler to load all blog entries
-    context.log.info('🔄 Calling load_more_handler to load all blog entries...')
-    await load_more_handler(context)
-    context.log.info('✅ load_more_handler completed')
+    if LOAD_MORE:
+        context.log.info('🔄 Calling load_more_handler to load all blog entries...')
+        await load_more_handler(context)
+        context.log.info('✅ load_more_handler completed')
 
     # Wait for page to load and check for table elements
     await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME + 1000)  # Extra wait for table elements
@@ -1569,8 +1572,14 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
         # Wait for page to load
         await page.wait_for_timeout(PAGE_LOAD_WAIT_TIME)
         
-        # Use hybrid extraction
-        extraction_results = await hybrid_extractor.extract_content_hybrid(url, page, context)
+        # Create storage directories first
+        storage_dir = Path('storage')
+        blog_dir = storage_dir / 'blogs' / blog_id
+        blog_dir.mkdir(parents=True, exist_ok=True)
+        images_dir = blog_dir / 'images'
+        
+        # Use hybrid extraction with blog-specific images directory
+        extraction_results = await hybrid_extractor.extract_content_hybrid(url, page, context, blog_images_dir=images_dir)
         
         # Log extraction results
         context.log.info(f'📊 Hybrid extraction results for {title}:')
@@ -1585,10 +1594,7 @@ async def handle_blog_content(context: PlaywrightCrawlingContext) -> None:
             hybrid_extractor.save_extraction_log(url, extraction_results, context)
             return
         
-        # Create storage directories
-        storage_dir = Path('storage')
-        blog_dir = storage_dir / 'blogs' / blog_id
-        blog_dir.mkdir(parents=True, exist_ok=True)
+        # Storage directories already created above
         
         # Save text content
         text_filename = hybrid_extractor.sanitize_filename(f"{blog_id}_{title[:50]}.txt")

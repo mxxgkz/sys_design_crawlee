@@ -46,7 +46,8 @@ class HybridContentExtractor:
         self, 
         url: str, 
         page: Optional[Page] = None,
-        context = None
+        context = None,
+        blog_images_dir: Optional[Path] = None
     ) -> Dict[str, Any]:
         """
         Extract content using hybrid approach with multiple fallback strategies
@@ -74,11 +75,11 @@ class HybridContentExtractor:
             if context:
                 context.log.info(f"Trying Newspaper3k extraction for {url}")
             
-            newspaper_result = await self._extract_with_newspaper(url, context)
+            newspaper_result = await self._extract_with_newspaper(url, context, blog_images_dir)
             if newspaper_result and newspaper_result.get('text'):
                 content_length = len(newspaper_result.get('text', ''))
                 # Always enhance with comprehensive image extraction, regardless of content length
-                enhanced_result = await self._enhance_with_comprehensive_images(newspaper_result, url, page)
+                enhanced_result = await self._enhance_with_comprehensive_images(newspaper_result, url, page, blog_images_dir)
                 
                 # Check if content is sufficient (minimum 500 characters for a meaningful blog post)
                 if content_length >= 500:
@@ -126,7 +127,7 @@ class HybridContentExtractor:
             if readability_result and readability_result.get('text'):
                 content_length = len(readability_result.get('text', ''))
                 # Always enhance with comprehensive image extraction, regardless of content length
-                enhanced_result = await self._enhance_with_comprehensive_images(readability_result, url, page)
+                enhanced_result = await self._enhance_with_comprehensive_images(readability_result, url, page, blog_images_dir)
                 
                 if content_length >= 500:
                     extraction_results['methods_tried'].append('readability')
@@ -170,11 +171,11 @@ class HybridContentExtractor:
                 if context:
                     context.log.info(f"Trying custom Playwright extraction for {url}")
                 
-                custom_result = await self._extract_with_playwright(page, url, context)
+                custom_result = await self._extract_with_playwright(page, url, context, blog_images_dir)
                 if custom_result and custom_result.get('text'):
                     content_length = len(custom_result.get('text', ''))
                     # Always enhance with comprehensive image extraction, regardless of content length
-                    enhanced_result = await self._enhance_with_comprehensive_images(custom_result, url, page)
+                    enhanced_result = await self._enhance_with_comprehensive_images(custom_result, url, page, blog_images_dir)
                     
                     if content_length >= 500:
                         extraction_results['methods_tried'].append('playwright')
@@ -221,7 +222,7 @@ class HybridContentExtractor:
         
         return extraction_results
     
-    async def _enhance_with_comprehensive_images(self, result: Dict[str, Any], url: str, page=None) -> Dict[str, Any]:
+    async def _enhance_with_comprehensive_images(self, result: Dict[str, Any], url: str, page=None, blog_images_dir: Optional[Path] = None) -> Dict[str, Any]:
         """
         Enhance any extraction result with comprehensive image extraction.
         This ensures ALL images are captured regardless of which method succeeded.
@@ -230,6 +231,7 @@ class HybridContentExtractor:
             result: The extraction result from any method
             url: The URL being processed
             page: Optional Playwright page for getting rendered content
+            blog_images_dir: Directory to save images to
             
         Returns:
             Enhanced result with comprehensive image list
@@ -250,24 +252,31 @@ class HybridContentExtractor:
             
             # Extract ALL images from the HTML
             soup = BeautifulSoup(html_content, 'html.parser')
-            all_images = []
             all_img_tags = soup.find_all('img')
             
-            for img in all_img_tags:
+            # Get existing downloaded images from the result
+            existing_images = result.get('images', [])
+            existing_urls = {img.get('url', img.get('original_url', '')) for img in existing_images if img.get('url') or img.get('original_url')}
+            
+            # Process new images that weren't already downloaded
+            new_images = []
+            for i, img in enumerate(all_img_tags):
                 src = img.get('src')
                 alt = img.get('alt', '')
-                if src:
-                    all_images.append({
-                        'src': src,
-                        'alt': alt,
-                        'width': img.get('width', ''),
-                        'height': img.get('height', '')
-                    })
+                if src and src not in existing_urls:
+                    try:
+                        # Download the new image
+                        img_info = await self._process_image(src, url, len(existing_images) + i, alt, blog_images_dir)
+                        if img_info:
+                            new_images.append(img_info)
+                    except Exception as e:
+                        log_with_emoji("⚠️", f"Error processing additional image {src}", str(e), None)
+                        continue
             
-            # Update the result with comprehensive images
+            # Combine existing and new images
             enhanced_result = result.copy()
-            enhanced_result['images'] = all_images
-            enhanced_result['image_count'] = len(all_images)
+            enhanced_result['images'] = existing_images + new_images
+            enhanced_result['image_count'] = len(existing_images) + len(new_images)
             enhanced_result['comprehensive_images'] = True
             
             return enhanced_result
@@ -442,7 +451,7 @@ class HybridContentExtractor:
             log_with_emoji("⚠️", "Image extraction from elements failed", str(e))
         return images
 
-    async def _extract_with_newspaper(self, url: str, context=None) -> Optional[Dict[str, Any]]:
+    async def _extract_with_newspaper(self, url: str, context=None, blog_images_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
         """Extract content using Newspaper3k with SSL bypass"""
         try:
             log_with_emoji("🔍", "Trying Newspaper3k extraction", url, context)
@@ -511,7 +520,7 @@ class HybridContentExtractor:
                 log_with_emoji("📸", "Processing images", f"{len(image_list)} images", context)
                 for i, img_url in enumerate(image_list):
                     try:
-                        img_info = await self._process_image(img_url, url, i)
+                        img_info = await self._process_image(img_url, url, i, blog_images_dir=blog_images_dir)
                         if img_info:
                             images.append(img_info)
                     except Exception as e:
@@ -589,7 +598,7 @@ class HybridContentExtractor:
             log_with_emoji("❌", "Readability extraction failed", str(e), context)
             return None
     
-    async def _extract_with_playwright(self, page: Page, url: str, context) -> Optional[Dict[str, Any]]:
+    async def _extract_with_playwright(self, page: Page, url: str, context, blog_images_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
         """Extract content using custom Playwright selectors (fallback)"""
         try:
             # Wait for page to load
@@ -677,7 +686,7 @@ class HybridContentExtractor:
                             except Exception:
                                 continue
                         
-                        img_info = await self._process_image(img_src, url, i, alt)
+                        img_info = await self._process_image(img_src, url, i, alt, blog_images_dir=blog_images_dir)
                         if img_info:
                             images.append(img_info)
                     except Exception:
@@ -701,7 +710,7 @@ class HybridContentExtractor:
             log_with_emoji("❌", "Playwright extraction failed", str(e), context)
             return None
     
-    async def _process_image(self, img_url: str, base_url: str, index: int, alt_text: str = "") -> Optional[Dict[str, Any]]:
+    async def _process_image(self, img_url: str, base_url: str, index: int, alt_text: str = "", blog_images_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
         """Process and download an image"""
         try:
             # Skip data URLs (inline images like SVG, base64, etc.)
@@ -728,8 +737,14 @@ class HybridContentExtractor:
                     if response.status == 200:
                         content = await response.read()
                         
-                        # Save image
-                        img_path = self.storage_dir / "images" / filename
+                        # Save image to blog images directory (default behavior)
+                        if blog_images_dir:
+                            blog_images_dir.mkdir(parents=True, exist_ok=True)
+                            img_path = blog_images_dir / filename
+                        else:
+                            # Fallback to global images directory
+                            img_path = self.storage_dir / "images" / filename
+                        
                         with open(img_path, 'wb') as f:
                             f.write(content)
                         
