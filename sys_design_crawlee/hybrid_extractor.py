@@ -3,10 +3,8 @@ Hybrid Content Extraction Module
 Combines multiple mature strategies for robust blog content extraction
 """
 
-import asyncio
 import hashlib
 import json
-import logging
 import os
 import re
 import urllib3
@@ -33,8 +31,9 @@ class HybridContentExtractor:
     3. Custom Playwright extraction (fallback) - for complex cases
     """
     
-    def __init__(self, storage_dir: str = "storage"):
+    def __init__(self, storage_dir: str = "storage", max_images: int = 0):
         self.storage_dir = Path(storage_dir)
+        self.max_images = max_images  # Configurable image limit
         self.storage_dir.mkdir(exist_ok=True)
         
         # Create subdirectories
@@ -258,20 +257,26 @@ class HybridContentExtractor:
             existing_images = result.get('images', [])
             existing_urls = {img.get('url', img.get('original_url', '')) for img in existing_images if img.get('url') or img.get('original_url')}
             
-            # Process new images that weren't already downloaded
+            # Process new images that weren't already downloaded (sorted for deterministic processing)
             new_images = []
-            for i, img in enumerate(all_img_tags):
+            new_img_sources = []
+            for img in all_img_tags:
                 src = img.get('src')
-                alt = img.get('alt', '')
                 if src and src not in existing_urls:
-                    try:
-                        # Download the new image
-                        img_info = await self._process_image(src, url, len(existing_images) + i, alt, blog_images_dir)
-                        if img_info:
-                            new_images.append(img_info)
-                    except Exception as e:
-                        log_with_emoji("⚠️", f"Error processing additional image {src}", str(e), None)
-                        continue
+                    new_img_sources.append((src, img.get('alt', '')))
+            
+            # Sort by URL for deterministic processing
+            new_img_sources.sort(key=lambda x: x[0])
+            
+            for i, (src, alt) in enumerate(new_img_sources):
+                try:
+                    # Download the new image
+                    img_info = await self._process_image(src, url, len(existing_images) + i, alt, blog_images_dir)
+                    if img_info:
+                        new_images.append(img_info)
+                except Exception as e:
+                    log_with_emoji("⚠️", f"Error processing additional image {src}", str(e), None)
+                    continue
             
             # Combine existing and new images
             enhanced_result = result.copy()
@@ -515,8 +520,10 @@ class HybridContentExtractor:
             # Download and process images
             images = []
             if article.images:
-                # Convert set to list and limit to 10 images
-                image_list = list(article.images)[:10]
+                # Convert set to list, sort for deterministic processing, and limit images
+                image_list = sorted(list(article.images))
+                if self.max_images > 0:
+                    image_list = image_list[:self.max_images]
                 log_with_emoji("📸", "Processing images", f"{len(image_list)} images", context)
                 for i, img_url in enumerate(image_list):
                     try:
@@ -672,8 +679,11 @@ class HybridContentExtractor:
                     except Exception:
                         continue
                 
-                # Process all unique images
-                for i, img_src in enumerate(list(all_images)[:10]):  # Limit to 10 images
+                # Process all unique images (sorted for deterministic processing)
+                sorted_images = sorted(list(all_images))
+                if self.max_images > 0:
+                    sorted_images = sorted_images[:self.max_images]
+                for i, img_src in enumerate(sorted_images):
                     try:
                         # Get alt text from the first matching element
                         alt = ""
@@ -726,10 +736,11 @@ class HybridContentExtractor:
             elif not img_url.startswith('http'):
                 img_url = urljoin(base_url, img_url)
             
-            # Generate filename
+            # Generate deterministic filename based on URL hash
+            url_hash = hashlib.md5(img_url.encode('utf-8')).hexdigest()[:8]
             parsed_url = urlparse(img_url)
             file_ext = os.path.splitext(parsed_url.path)[1] or '.jpg'
-            filename = f"image_{index:03d}{file_ext}"
+            filename = f"image_{url_hash}{file_ext}"
             
             # Download image
             async with aiohttp.ClientSession() as session:

@@ -26,7 +26,7 @@ sys.path.insert(0, str(project_root))
 from sys_design_crawlee.main import main
 
 
-async def test_crawler_with_limit(max_blogs: int = 3, force_reextract: bool = False, test_problematic: bool = False):
+async def test_crawler_with_limit(max_blogs: int = 3, force_reextract: bool = False, load_more: bool = False, test_problematic: bool = False):
     """Test the crawler with a limited number of blogs"""
     
     print(f"🚀 Testing Crawler with {max_blogs} Blog Limit")
@@ -42,13 +42,15 @@ async def test_crawler_with_limit(max_blogs: int = 3, force_reextract: bool = Fa
     print("4. Save results to database and files")
     if force_reextract:
         print("5. Re-extract all content regardless of previous status")
+    if load_more:
+        print("6. Load more blogs from the main page")
     if test_problematic:
         print("6. ONLY process problematic domains for anti-bot testing")
     print("=" * 60)
     
     try:
         # Run the main crawler with limit
-        await main(max_blogs=max_blogs, force_reextract=force_reextract, test_problematic=test_problematic)
+        await main(max_blogs=max_blogs, force_reextract=force_reextract, load_more=load_more, test_problematic=test_problematic)
         
         print(f"\n✅ Crawler completed with {max_blogs} blog limit!")
         print("📊 Check the following for results:")
