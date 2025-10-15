@@ -16,4 +16,10 @@ When the dependencies are installed, you may launch the crawler with:
 python -m sys_design_crawlee
 ```
 
+Test crawler
+
+```sh
+python test_full_crawler.py --max-blogs 3
+```
+
 
