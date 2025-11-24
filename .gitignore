@@ -3,7 +3,8 @@
 __pycache__/
 storage/
 logs/
-./notebooks/datasets/*
+notebooks/datasets/
+datasets/
 .DS_Store
 *.log
 None/
