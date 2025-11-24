@@ -51,8 +51,29 @@ python rag_app/improved_interactive_rag.py
 - ✅ **Multiple LLM options** (Ollama free, OpenAI paid)
 - ✅ **Interactive interface** for easy querying
 
-## 🎯 **Next Steps (Optional):**
+## 🎯 **Next Steps & Improvements:**
 
+### **📚 Improvement Roadmap:**
+See `IMPROVEMENT_ROADMAP.md` for comprehensive improvement directions including:
+- **Retrieval Quality**: Hybrid search, reranking, query expansion
+- **Answer Generation**: Advanced prompts, citation systems
+- **System Design**: Caching, async processing, monitoring
+- **Metrics & Evaluation**: Comprehensive metrics framework
+
+### **📊 Evaluation Framework:**
+See `evaluation_metrics.py` for metrics implementation:
+- **Retrieval Metrics**: Precision@K, Recall@K, MRR, NDCG
+- **Generation Metrics**: BLEU, ROUGE-L, Semantic Similarity
+- **System Metrics**: Latency, Throughput, Error Rates
+
+### **🎤 Interview Preparation:**
+See `INTERVIEW_QUICK_REFERENCE.md` for:
+- Key talking points for ML system design interviews
+- Common questions and answers
+- Metrics dashboard and improvements
+- Technical stack overview
+
+### **Quick Wins:**
 1. **Add More Data**: Crawl more engineering blogs
 2. **Fine-tune Models**: Customize for specific domains
 3. **Web Interface**: Build a web UI

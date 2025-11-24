@@ -1143,7 +1143,7 @@ async def parse_table_data(context: PlaywrightCrawlingContext, page, data_elemen
             col_2_cell = page.locator(f'div.notion-table-view-cell[data-row-index="{row_index}"][data-col-index="2"]')
             if await col_2_cell.count() > 0:
                 spans = col_2_cell.first.locator('span')
-                tags_text = " ".join([await spans.nth(k).inner_text() for k in range(await spans.count())])
+                tags_text = ",".join([await spans.nth(k).inner_text() for k in range(await spans.count())])
                 row_data.append(tags_text.strip())
             else:
                 context.log.warning(f'Row {row_index}: Column 2 (tags) not found')
@@ -1426,7 +1426,7 @@ async def handle_main_page(context: PlaywrightCrawlingContext) -> None:
                                     tag_text = await spans.nth(k).inner_text()
                                     if tag_text.strip():
                                         tags_list.append(tag_text.strip())
-                                tags = " ".join(tags_list)
+                                tags = ",".join(tags_list)
                             
                             # Get year from column 3
                             year_cell = page.locator(f'div[data-row-index="{row_index}"][data-col-index="3"]')
